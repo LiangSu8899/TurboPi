@@ -1,0 +1,93 @@
+{
+  "config": {
+    "model_path": "/home/heima-thor/.cache/openpi/checkpoints/pi05_libero",
+    "device": "cuda",
+    "num_runs": 20
+  },
+  "results": [
+    {
+      "label": "Baseline (10 steps)",
+      "num_steps": 10,
+      "mean_latency_ms": 280.86478542536497,
+      "std_latency_ms": 1.3286123404984995,
+      "min_latency_ms": 278.8079781457782,
+      "max_latency_ms": 284.70640419982374,
+      "p50_latency_ms": 280.40513454470783,
+      "p95_latency_ms": 282.9587545245886,
+      "p99_latency_ms": 284.3568742647767,
+      "throughput_hz": 3.560432107875385,
+      "peak_memory_gb": 7.646042112,
+      "allocated_memory_gb": 7.496395776,
+      "num_runs": 20
+    },
+    {
+      "label": "Baseline (5 steps)",
+      "num_steps": 5,
+      "mean_latency_ms": 205.274058599025,
+      "std_latency_ms": 0.9887627748457581,
+      "min_latency_ms": 203.83105403743684,
+      "max_latency_ms": 207.48388301581144,
+      "p50_latency_ms": 205.19670157227665,
+      "p95_latency_ms": 207.1098099811934,
+      "p99_latency_ms": 207.40906840888783,
+      "throughput_hz": 4.871536164018485,
+      "peak_memory_gb": 7.646042112,
+      "allocated_memory_gb": 7.496395776,
+      "num_runs": 20
+    },
+    {
+      "label": "Baseline (3 steps)",
+      "num_steps": 3,
+      "mean_latency_ms": 174.95122250402346,
+      "std_latency_ms": 0.7271013276659599,
+      "min_latency_ms": 173.9050119649619,
+      "max_latency_ms": 176.35873705148697,
+      "p50_latency_ms": 174.93773496244103,
+      "p95_latency_ms": 176.13212305586785,
+      "p99_latency_ms": 176.31341425236315,
+      "throughput_hz": 5.71587889291258,
+      "peak_memory_gb": 7.646042112,
+      "allocated_memory_gb": 7.496395776,
+      "num_runs": 20
+    },
+    {
+      "label": "torch.compile (max-autotune, 10 steps)",
+      "num_steps": 10,
+      "mean_latency_ms": 363.1067421520129,
+      "std_latency_ms": 0.6624741551741042,
+      "min_latency_ms": 362.04370483756065,
+      "max_latency_ms": 364.5182498730719,
+      "p50_latency_ms": 363.08862757869065,
+      "p95_latency_ms": 364.3153393873945,
+      "throughput_hz": 2.7540111044849582,
+      "peak_memory_gb": 7.486846976,
+      "num_runs": 20
+    },
+    {
+      "label": "torch.compile (max-autotune, 5 steps)",
+      "num_steps": 5,
+      "mean_latency_ms": 452.00402584159747,
+      "std_latency_ms": 230.36227015790317,
+      "min_latency_ms": 246.9005410093814,
+      "max_latency_ms": 1205.5511891376227,
+      "p50_latency_ms": 525.3059874521568,
+      "p95_latency_ms": 633.5927041247492,
+      "throughput_hz": 2.2123696755533873,
+      "peak_memory_gb": 8.62986752,
+      "num_runs": 20
+    },
+    {
+      "label": "Baseline+CUDASync (10 steps)",
+      "num_steps": 10,
+      "mean_latency_ms": 284.563334309496,
+      "std_latency_ms": 0.9742676958308034,
+      "throughput_hz": 3.5141561804739845,
+      "peak_memory_gb": 7.646050304,
+      "num_runs": 20
+    },
+    {
+      "label": "torch.compile (inductor, 10 steps)",
+      "error": "Inductor backend requires Triton which is not available on aarch64"
+    }
+  ]
+}

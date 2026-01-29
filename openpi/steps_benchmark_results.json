@@ -1,0 +1,47 @@
+{
+  "model_path": "/root/.cache/openpi/pytorch_checkpoints/pi05_libero",
+  "steps_tested": [
+    10,
+    5,
+    3,
+    2
+  ],
+  "results": [
+    {
+      "num_steps": 10,
+      "latency_ms": 582.5072509765625,
+      "throughput_hz": 1.7167168276850093,
+      "mse_vs_10steps": 0.0,
+      "max_diff_vs_10steps": 0.0,
+      "action_mean": 0.011966018006205559,
+      "action_std": 1.192409873008728
+    },
+    {
+      "num_steps": 5,
+      "latency_ms": 438.95278015136716,
+      "throughput_hz": 2.2781493709987735,
+      "mse_vs_10steps": 0.002868915442377329,
+      "max_diff_vs_10steps": 0.1953125,
+      "action_mean": 0.018129462376236916,
+      "action_std": 1.1918015480041504
+    },
+    {
+      "num_steps": 3,
+      "latency_ms": 381.1524597167969,
+      "throughput_hz": 2.6236220559694616,
+      "mse_vs_10steps": 0.008955339901149273,
+      "max_diff_vs_10steps": 0.298828125,
+      "action_mean": 0.012127227149903774,
+      "action_std": 1.1932647228240967
+    },
+    {
+      "num_steps": 2,
+      "latency_ms": 354.0381622314453,
+      "throughput_hz": 2.824554261882848,
+      "mse_vs_10steps": 0.021251842379570007,
+      "max_diff_vs_10steps": 0.46630859375,
+      "action_mean": -0.015232848934829235,
+      "action_std": 1.196719765663147
+    }
+  ]
+}

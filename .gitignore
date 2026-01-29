@@ -1,0 +1,8 @@
+# Claude Code related files
+.claude/
+**/.claude/
+*.jsonl
+/plans/
+
+# Temporary files
+=*
