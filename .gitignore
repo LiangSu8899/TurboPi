@@ -6,3 +6,8 @@
 
 # Temporary files
 =*
+
+# Internal documentation (keep locally)
+docs/
+openpi/docs/PERFORMANCE_COMPARISON_REPORT.md
+openpi/docs/FIX_REPORT_KV_CACHE_BUG.md
