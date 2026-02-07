@@ -7,7 +7,39 @@
 # Temporary files
 =*
 
-# Internal documentation (keep locally)
+# Internal development documentation (local only)
 docs/
-openpi/docs/PERFORMANCE_COMPARISON_REPORT.md
-openpi/docs/FIX_REPORT_KV_CACHE_BUG.md
+
+# OpenPI internal docs and experimental results
+openpi/docs/
+openpi/benchmark_results/
+openpi/eval_results/
+openpi/calibration_data_synthetic/
+openpi/onnx_exports_w8a16/
+openpi/onnx_titan/
+openpi/turbo_attention_plugin/
+openpi/openpi/
+upload_staging/
+
+# Experiment JSON results (local only)
+openpi/*.json
+openpi/dynamic_kv_*.json
+openpi/libero_*.json
+openpi/modality_*.json
+openpi/synchronized_*.json
+openpi/torch_trt_*.json
+
+# Temporary model files
+openpi/*.pt
+openpi/*.npy
+openpi/*.onnx.data
+openpi/MUJOCO_LOG.TXT
+
+# Development scripts (not for production)
+openpi/benchmark_*.py
+openpi/build_*.py
+openpi/test_*.py
+openpi/verify_*.py
+
+# Release notes (draft)
+RELEASE_NOTES.md

@@ -1,5 +1,9 @@
 # Dockerfile for LIBERO evaluation on Jetson Thor
 # Uses NVIDIA PyTorch container with sm_110 support
+#
+# IMPORTANT: The base image includes CUDA-enabled PyTorch. We must use --no-deps
+# when installing packages that have torch as a dependency (like lerobot) to
+# prevent them from overwriting the CUDA version with CPU-only PyTorch.
 
 FROM nvcr.io/nvidia/pytorch:25.12-py3
 
@@ -17,8 +21,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies for LIBERO environment
+# Note: Install packages that don't have torch dependency first
+# Use gymnasium==0.29.1 to match lerobot requirements
 RUN pip install --no-cache-dir \
-    gymnasium \
+    "gymnasium==0.29.1" \
     "gym==0.26.2" \
     robosuite==1.4.1 \
     mujoco \
@@ -35,7 +41,34 @@ RUN pip install --no-cache-dir \
     einops \
     safetensors \
     gcsfs \
+    pycuda
+
+# Install lerobot with --no-deps to preserve CUDA PyTorch from base image
+# lerobot's runtime dependencies (torch, numpy, pillow, etc.) are already
+# provided by the base image and other installed packages
+RUN pip install --no-cache-dir --no-deps \
     lerobot@git+https://github.com/huggingface/lerobot@0cf864870cf29f4738d3ade893e6fd13fbd7cdb5
+
+# Install lerobot's non-torch dependencies that may not be in base image
+# Note: rerun-sdk is intentionally excluded as it requires numpy>=2 which conflicts
+# with our numpy<2 constraint. rerun-sdk is only used for visualization, not evaluation.
+RUN pip install --no-cache-dir \
+    datasets \
+    huggingface_hub \
+    av \
+    cmake \
+    pyzmq \
+    pyserial \
+    deepdiff \
+    diffusers \
+    draccus==0.10.0 \
+    flask \
+    gdown \
+    jsonlines \
+    omegaconf \
+    pymunk \
+    wandb \
+    zarr
 
 # Install openpi dependencies (JAX, Flax, etc.)
 RUN pip install --no-cache-dir \

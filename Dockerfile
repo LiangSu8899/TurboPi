@@ -1,11 +1,11 @@
 # Turbo-Pi0.5 Deployment Container
 # For NVIDIA Jetson Thor / GPU systems with CUDA 12.0+
 
-FROM nvcr.io/nvidia/pytorch:24.01-py3
+FROM nvcr.io/nvidia/pytorch:25.12-py3
 
 LABEL maintainer="LiangSu8899"
-LABEL version="1.0.0"
-LABEL description="Turbo-Pi0.5 VLA Model - 14.7x faster inference"
+LABEL version="1.1.2"
+LABEL description="Turbo-Pi0.5 VLA Model - 19.2x faster inference"
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
@@ -27,6 +27,7 @@ COPY openpi/ /app/
 
 # Install Python dependencies
 RUN pip install --upgrade pip && \
+    pip install pycuda einops safetensors pillow && \
     pip install -e . && \
     pip install huggingface_hub
 
@@ -36,7 +37,7 @@ RUN mkdir -p /root/.cache/openpi/checkpoints
 # Download model from HuggingFace (optional - can mount externally)
 ARG DOWNLOAD_MODEL=false
 RUN if [ "$DOWNLOAD_MODEL" = "true" ]; then \
-    huggingface-cli download liangsu9988/Turbo-Pi0.5 \
+    huggingface-cli download liangsu9988/Turbo-Pi0.5-1.1.2 \
         --local-dir /root/.cache/openpi/checkpoints/pi05_libero; \
     fi
 

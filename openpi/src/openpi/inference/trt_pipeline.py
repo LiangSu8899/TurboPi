@@ -16,13 +16,18 @@ Performance Target:
     Pipelined:  max(Vision, Action) = 43.45 ms → 23.0 Hz (+12.7%)
 """
 
+from __future__ import annotations
+
 import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Any
 
 import numpy as np
+
+if TYPE_CHECKING:
+    import pycuda.driver as cuda
 
 logging.basicConfig(
     level=logging.INFO,

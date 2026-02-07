@@ -57,8 +57,7 @@ def check_onnx():
 def load_model(checkpoint_path: str, device: str = "cuda"):
     """Load Pi0.5 model from checkpoint."""
     import json
-    from openpi.models_pytorch.pi0_pytorch import PI0Pytorch
-    from openpi.models.pi0_config import Pi0Config
+    from openpi.models_pytorch.pi0_pytorch import PI0Pytorch, Pi0Config
     from safetensors.torch import load_file
 
     logger.info(f"Loading model from: {checkpoint_path}")

@@ -473,16 +473,32 @@ class PI0Pytorch(nn.Module):
             kv_cache.append((key_states.clone(), value_states.clone()))
 
             # Complete the layer forward pass to get hidden_states for next layer
-            scaling = layer.self_attn.scaling
-            att_output, _ = modeling_gemma.eager_attention_forward(
-                layer.self_attn, query_states, key_states, value_states,
-                prefix_att_2d_masks_4d, scaling
-            )
+            # Use SDPA with GQA support (repeat_kv for key/value heads)
+            batch_size = query_states.shape[0]
+            seq_len = query_states.shape[2]
+            num_kv_groups = layer.self_attn.num_key_value_groups
 
+            # Expand key/value for GQA (1 kv head -> 8 q heads)
+            key_expanded = key_states[:, :, None, :, :].expand(
+                batch_size, key_states.shape[1], num_kv_groups, seq_len, key_states.shape[-1]
+            ).reshape(batch_size, -1, seq_len, key_states.shape[-1])
+            value_expanded = value_states[:, :, None, :, :].expand(
+                batch_size, value_states.shape[1], num_kv_groups, seq_len, value_states.shape[-1]
+            ).reshape(batch_size, -1, seq_len, value_states.shape[-1])
+
+            att_output = torch.nn.functional.scaled_dot_product_attention(
+                query_states,
+                key_expanded,
+                value_expanded,
+                attn_mask=prefix_att_2d_masks_4d.to(query_states.dtype),
+                dropout_p=0.0,
+                is_causal=False,
+                scale=layer.self_attn.scaling,
+            )
+            # att_output: (B, num_heads, seq_len, head_dim) -> (B, seq_len, hidden_size)
             head_dim = layer.self_attn.head_dim
             num_heads = layer.self_attn.config.num_attention_heads
-            batch_size = query_states.shape[0]
-            att_output = att_output.reshape(batch_size, -1, num_heads * head_dim)
+            att_output = att_output.transpose(1, 2).reshape(batch_size, seq_len, num_heads * head_dim)
 
             if att_output.dtype != layer.self_attn.o_proj.weight.dtype:
                 att_output = att_output.to(layer.self_attn.o_proj.weight.dtype)
@@ -691,6 +707,63 @@ class PI0Pytorch(nn.Module):
                 )
                 x_t = x_t + dt * v_t
                 time += dt
+
+        return x_t
+
+    @torch.no_grad()
+    def sample_actions_with_external_kv(
+        self,
+        device,
+        state: Tensor,
+        prefix_kv_cache: list[tuple[Tensor, Tensor]],
+        prefix_pad_masks: Tensor,
+        noise=None,
+        num_steps=10,
+    ) -> Tensor:
+        """Denoise actions using an externally provided KV cache.
+
+        This enables Vision/KV cache reuse across frames - the expensive
+        compute_prefix_kv_cache() can be skipped when reusing cached KV from
+        a previous frame.
+
+        Args:
+            device: Device to run inference on
+            state: (B, state_dim) robot state tensor
+            prefix_kv_cache: Pre-computed KV cache from compute_prefix_kv_cache()
+            prefix_pad_masks: (B, prefix_len) padding mask from embed_prefix()
+            noise: Optional initial noise
+            num_steps: Number of denoising steps
+
+        Returns:
+            Denoised actions tensor (B, action_horizon, action_dim)
+        """
+        bsize = state.shape[0]
+        if noise is None:
+            actions_shape = (bsize, self.config.action_horizon, self.config.action_dim)
+            noise = self.sample_noise(actions_shape, device)
+
+        dt = -1.0 / num_steps
+        dt = torch.tensor(dt, dtype=torch.float32, device=device)
+
+        # Get the model's dtype from the first parameter
+        model_dtype = next(self.parameters()).dtype
+
+        # Convert noise to model dtype if needed
+        x_t = noise.to(model_dtype)
+        time = torch.tensor(1.0, dtype=torch.float32, device=device)
+
+        # Run denoising loop with external KV cache
+        while time >= -dt / 2:
+            expanded_time = time.expand(bsize)
+            v_t = self.denoise_step_with_cache(
+                state,
+                prefix_kv_cache,
+                prefix_pad_masks,
+                x_t,
+                expanded_time,
+            )
+            x_t = x_t + dt * v_t
+            time += dt
 
         return x_t
 
