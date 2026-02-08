@@ -1,0 +1,48 @@
+{
+  "timestamp": "2026-02-08T08:28:16.788707",
+  "config": {
+    "task_suite": "libero_spatial",
+    "denoising_steps": 10,
+    "schedule_type": "sigmoid",
+    "num_trials": 3,
+    "seed": 7
+  },
+  "accuracy": {
+    "total_episodes": 9,
+    "total_successes": 8,
+    "success_rate": 88.88888888888889
+  },
+  "latency": {
+    "count": 224,
+    "mean_ms": 310.43474636161505,
+    "std_ms": 0.9831904899436936,
+    "min_ms": 307.79804500002683,
+    "max_ms": 315.37518999994063,
+    "p50_ms": 310.4116279999971,
+    "p95_ms": 311.90820224991285,
+    "hz": 3.2212888915312767
+  },
+  "tasks": [
+    {
+      "task_id": 0,
+      "description": "pick up the black bowl between the plate and the ramekin and place it on the plate",
+      "successes": 2,
+      "episodes": 3,
+      "success_rate": 66.66666666666667
+    },
+    {
+      "task_id": 1,
+      "description": "pick up the black bowl next to the ramekin and place it on the plate",
+      "successes": 3,
+      "episodes": 3,
+      "success_rate": 100.0
+    },
+    {
+      "task_id": 2,
+      "description": "pick up the black bowl from table center and place it on the plate",
+      "successes": 3,
+      "episodes": 3,
+      "success_rate": 100.0
+    }
+  ]
+}
