@@ -858,3 +858,160 @@ Plan A    Plan B
 - [ ] INT4 量化实现
 - [ ] Triton Kernel 调优
 - [ ] 最终性能验证
+
+---
+
+## 十一、Phase 0 验证结果 (2026-02-08)
+
+### 测试结果汇总
+
+#### Triton 性能测试
+
+| 实现 | 延迟 | vs cuBLAS |
+|------|------|-----------|
+| torch.matmul (cuBLAS) | 0.47 ms | 1.00x |
+| **Triton FP16 MatMul** | **1.14 ms** | **0.41x** |
+
+**结论**: ❌ Triton 在 Thor SM 11.0 上性能只有 cuBLAS 的 41%，不可用。
+
+#### 量化库测试
+
+| 方案 | 性能 vs BF16 | 状态 |
+|------|-------------|------|
+| Triton INT4 | 0.02x | ❌ Triton 本身慢 |
+| torchao INT8 | 0.09x | ❌ 灾难性性能 |
+| torchao INT4 | N/A | ❌ 缺少 fbgemm-gpu-genai |
+| torch._int_mm (cuBLAS INT8) | 0.98x | ❌ 无加速 |
+| CUDA Graph | 1.00x | ≈ 无提升 |
+
+### 最终结论
+
+**所有量化加速方案在 Thor 上都不可用**:
+
+1. **Triton**: 基础 FP16 MatMul 就比 cuBLAS 慢 2.5x
+2. **torchao**: 没有 Thor SM 11.0 优化的 kernel
+3. **cuBLAS INT8**: 与 FP16 性能相同，无硬件加速
+4. **CUDA Graph**: 几乎没有收益
+
+### 更新后的优化路线
+
+```
+原计划:
+  Plan A (保守): 5.7 Hz → 7.0 Hz
+  Plan B (激进): 5.7 Hz → 8.7 Hz
+
+验证后:
+  ❌ Plan A/B 都不可行
+  ✅ 当前最佳: 维持 5.7 Hz
+```
+
+### 后续建议
+
+| 方向 | 优先级 | 预期收益 | 工作量 |
+|------|--------|----------|--------|
+| 等待 NVIDIA Thor 软件支持 | 高 | 未知 | 等待 |
+| **减少 denoising steps** | **高** | **12 Hz** | **1 天** |
+| 模型蒸馏 | 中 | 2-3x | 4-6 周 |
+| 减少 Transformer 层数 | 中 | 1.5x | 2 周 |
+
+### 执行清单更新
+
+- [x] 运行 `phase0_environment_check.py`
+- [x] 测试 Triton FP16 性能 (失败)
+- [x] 测试 torchao INT8/INT4 (失败)
+- [x] 测试 cuBLAS INT8 (无加速)
+- [x] 测试 CUDA Graph (无收益)
+- [ ] 验证 3-step denoising 精度 (下一步)
+
+---
+
+## Phase NVFP4: CUTLASS SM110a NVFP4 突破 (2025-02-08)
+
+### 重大发现
+
+经过深入调研和测试，成功在 Thor SM110 上运行 CUTLASS NVFP4 GEMM！
+
+### 测试方法论
+
+1. **TensorRT-LLM FP4 Ops**: 发现 TRT-LLM 的 NVFP4 内核只编译了 SM90a/SM100/SM120，**缺少 SM110**
+2. **CUTLASS 源码编译**: 修改 CUTLASS 72a example 支持 SM110a 架构
+3. **架构检查绕过**: 修改 `CUTLASS_ARCH_MMA_SM100_SUPPORTED` → `CUTLASS_ARCH_MMA_SM110_SUPPORTED`
+
+### 性能对比 (NVFP4 vs cuBLAS BF16)
+
+```
+======================================================================
+NVFP4 vs cuBLAS BF16 Benchmark on Thor SM110
+======================================================================
+
+Problem Size                   | BF16 (ms)    | NVFP4 (ms)   | Speedup
+------------------------------------------------------------------------------------------
+256x16384x2048                 | 0.356        | 0.082        | 4.34x
+256x2048x16384                 | 0.449        | 0.057        | 7.82x
+512x8192x2048                  | 0.231        | 0.082        | 2.82x
+512x2048x8192                  | 0.162        | 0.061        | 2.63x
+1024x4096x2048                 | 0.156        | 0.082        | 1.90x
+```
+
+### 关键限制
+
+1. **尺寸限制**: 某些 M*N 组合会失败 (如 512x16384, 712x16384)
+2. **对齐要求**: M 和 N 需要对齐到特定倍数
+3. **Pi0.5 实际 batch 712 不支持**: 需要 padding 或拆分
+
+### 架构兼容性发现
+
+| 架构 | MMA 指令 | Thor 兼容性 |
+|------|----------|-------------|
+| SM100 (B100/B200) | tcgen05.mma.blockscaled | ✅ 部分兼容 |
+| SM120 (RTX 50xx) | mma.sync.aligned.block_scale | ❌ 不兼容 |
+| SM110 (Thor) | tcgen05.mma.blockscaled | ✅ 自编译成功 |
+
+### 编译方法
+
+```bash
+# 在 Docker 容器中
+cd /workspace/external/cutlass_sm110_build
+
+# 复制并修改示例
+cp /usr/local/lib/python3.12/dist-packages/cutlass_library/source/examples/72_blackwell_narrow_precision_gemm/72a_blackwell_nvfp4_bf16_gemm.cu .
+
+# 修改架构检查
+sed -i 's/CUTLASS_ARCH_MMA_SM100_SUPPORTED/CUTLASS_ARCH_MMA_SM110_SUPPORTED/g' 72a_blackwell_nvfp4_bf16_gemm.cu
+
+# 编译
+CUTLASS_PATH=/usr/local/lib/python3.12/dist-packages/cutlass_library/source
+nvcc -O3 -std=c++17 -arch=sm_110a \
+    --expt-relaxed-constexpr \
+    -I$CUTLASS_PATH/include \
+    -I$CUTLASS_PATH/tools/util/include \
+    -I$CUTLASS_PATH/examples/common \
+    72a_blackwell_nvfp4_bf16_gemm.cu \
+    -o nvfp4_gemm_sm110a
+```
+
+### 理论加速潜力
+
+假设 NVFP4 可以用于 MLP:
+- 当前 MLP 权重读取: 18.1 ms (BF16)
+- NVFP4 理论: 4.5 ms (1/4 权重)
+- 实测加速: 2.8x - 7.8x (取决于尺寸)
+
+| 组件 | 当前 | NVFP4 优化 |
+|------|------|-----------|
+| MLP GEMM | 18.1 ms | ~4-6 ms |
+| KV Cache 总计 | 54 ms | ~25-35 ms |
+
+### 下一步计划
+
+1. **封装 PyTorch Op**: 将 CUTLASS NVFP4 kernel 封装为可调用的 PyTorch 扩展
+2. **量化权重**: 实现 Pi0.5 模型权重的 FP4 量化
+3. **集成测试**: 验证端到端精度和性能
+4. **解决尺寸限制**: 通过 padding 或拆分支持 batch=712
+
+### 社区反馈建议
+
+建议向 NVIDIA 反馈:
+1. TensorRT-LLM 缺少 SM110 NVFP4 内核编译
+2. CUTLASS 文档缺少 SM110 示例
+3. 请求官方 Thor NVFP4 支持

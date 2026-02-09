@@ -1,0 +1,49 @@
+{
+  "task": "pick up the black bowl between the plate and the ramekin and place it on the plate",
+  "num_frames": 6,
+  "dilation_kernel": 5,
+  "frames": [
+    {
+      "frame": 0,
+      "max_importance_base": 0.1953125,
+      "max_importance_wrist": 0.177734375,
+      "mean_importance_base": 0.003904091427102685,
+      "mean_importance_wrist": 0.003903987817466259
+    },
+    {
+      "frame": 1,
+      "max_importance_base": 0.11669921875,
+      "max_importance_wrist": 0.224609375,
+      "mean_importance_base": 0.003897334448993206,
+      "mean_importance_wrist": 0.0039003309793770313
+    },
+    {
+      "frame": 2,
+      "max_importance_base": 0.1083984375,
+      "max_importance_wrist": 0.2158203125,
+      "mean_importance_base": 0.003915011882781982,
+      "mean_importance_wrist": 0.003912435844540596
+    },
+    {
+      "frame": 3,
+      "max_importance_base": 0.08154296875,
+      "max_importance_wrist": 0.138671875,
+      "mean_importance_base": 0.003907943610101938,
+      "mean_importance_wrist": 0.0039009558968245983
+    },
+    {
+      "frame": 4,
+      "max_importance_base": 0.08251953125,
+      "max_importance_wrist": 0.1279296875,
+      "mean_importance_base": 0.0039005987346172333,
+      "mean_importance_wrist": 0.003918441478163004
+    },
+    {
+      "frame": 5,
+      "max_importance_base": 0.11181640625,
+      "max_importance_wrist": 0.10595703125,
+      "mean_importance_base": 0.0038997649680823088,
+      "mean_importance_wrist": 0.003906261175870895
+    }
+  ]
+}

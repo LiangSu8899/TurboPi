@@ -392,12 +392,78 @@ TensorRT 日志显示：
    - INT4 MLP: ~11.6 ms (理论 1/4)
    - **预期节省: ~35 ms**
 
-### 决策: Plan B (INT4 Triton Kernel)
+### 初步决策: Plan B (INT4 Triton Kernel)
 
+原计划:
 | 方案 | KV Cache | 总延迟 | Hz |
 |------|----------|--------|-----|
 | 当前 BF16 | 54 ms | 173 ms | 5.8 Hz |
 | **INT4 量化** | **~17 ms** | **~136 ms** | **7.4 Hz** |
+
+---
+
+## 量化方案验证结果 (2026-02-08)
+
+### Triton 基础性能测试
+
+| 实现 | 延迟 | vs cuBLAS |
+|------|------|-----------|
+| torch.matmul (cuBLAS) | 0.47 ms | 1.00x |
+| **Triton FP16 MatMul** | **1.14 ms** | **0.41x** |
+
+**结论**: Triton 在 Thor SM 11.0 上即使是 FP16 MatMul 也只有 cuBLAS 的 **41%** 性能。
+
+### 量化库测试
+
+| 方案 | 性能 vs BF16 | 精度 | 状态 |
+|------|-------------|------|------|
+| Triton INT4 (自定义) | 0.02x | ✅ 0.993 | ❌ Triton 本身慢 |
+| torchao INT8 | **0.09x** | ✅ 0.9999 | ❌ 灾难性性能 |
+| torchao INT4 | N/A | - | ❌ 缺少 fbgemm-gpu-genai |
+| **torch._int_mm** | **0.98x** | - | ❌ **cuBLAS INT8 无加速** |
+| CUDA Graph | 1.00x | - | ≈ 无提升 |
+
+### 关键发现
+
+1. **Triton 不适合 Thor 平台**
+   - 即使简单的 FP16 MatMul 也比 cuBLAS 慢 2.5x
+   - 写自定义 INT4 kernel 不可行
+
+2. **torchao 量化性能灾难**
+   - INT8: 比 BF16 慢 **11 倍**
+   - INT4: 缺少 Thor 上的 fbgemm-gpu-genai 依赖
+
+3. **cuBLAS INT8 无加速**
+   - torch._int_mm: 0.98x (与 FP16 性能相同)
+   - Thor 的 INT8 Tensor Core 可能没有被正确使用
+
+4. **CUDA Graph 无效**
+   - MLP baseline: 2.62 ms
+   - CUDA Graph: 2.63 ms
+   - 几乎没有提升
+
+### 最终结论
+
+**Thor 平台上所有量化加速方案目前都不可用**:
+- Triton kernel 性能差 (0.41x cuBLAS)
+- torchao INT8/INT4 没有 Thor 优化
+- cuBLAS INT8 与 FP16 性能相同
+- CUDA Graph 无明显收益
+
+**当前最佳方案**:
+- 维持 BF16 推理
+- 当前 KV Cache: ~54 ms
+- 当前总延迟: ~173 ms
+- **当前频率: ~5.8 Hz**
+
+### 后续建议
+
+| 方向 | 可行性 | 说明 |
+|------|--------|------|
+| 等待 NVIDIA Thor 软件支持 | 中 | 等 TRT 10.15+ / Triton Thor 优化 |
+| 模型蒸馏 | 高 | 训练更小的模型 |
+| 减少 Transformer 层数 | 中 | 18→12 层，需验证精度 |
+| TensorRT 完整 INT8 pipeline | 低 | 需要大量校准工作 |
 
 ---
 

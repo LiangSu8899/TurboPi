@@ -1,0 +1,21 @@
+{
+  "task": "pick up the black bowl between the plate and the ramekin and place it on the plate",
+  "num_frames": 2,
+  "dilation_kernel": 5,
+  "frames": [
+    {
+      "frame": 0,
+      "max_importance_base": 0.2001953125,
+      "max_importance_wrist": 0.181640625,
+      "mean_importance_base": 0.003914525732398033,
+      "mean_importance_wrist": 0.0039063710719347
+    },
+    {
+      "frame": 1,
+      "max_importance_base": 0.20703125,
+      "max_importance_wrist": 0.283203125,
+      "mean_importance_base": 0.0039051424246281385,
+      "mean_importance_wrist": 0.003909378312528133
+    }
+  ]
+}
