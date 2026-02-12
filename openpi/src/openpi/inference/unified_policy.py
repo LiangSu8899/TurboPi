@@ -2416,6 +2416,15 @@ class TorchTRTFP8Backend(PyTorchBackend):
             return {}
 
 
+# Import W4A16 TVM Backend
+try:
+    from openpi.inference.w4a16_backend import W4A16TVMBackend
+    _w4a16_available = True
+except ImportError:
+    W4A16TVMBackend = None
+    _w4a16_available = False
+
+
 class UnifiedPolicy:
     """
     Unified policy interface for Pi0.5 VLA model.
@@ -2479,6 +2488,16 @@ class UnifiedPolicy:
         "torch_trt_fp8": TorchTRTFP8Backend,  # No KV reuse, highest accuracy, ~140ms
         "torch_trt_fp8_freq1": lambda cfg: TorchTRTFP8Backend(cfg, kv_reuse_freq=1),  # Same as above
         "torch_trt_fp8_freq2": lambda cfg: TorchTRTFP8Backend(cfg, kv_reuse_freq=2),  # KV reuse
+
+        # W4A16 TVM backends (FASTEST MLP - uses packed FP4 TVM kernels)
+        # MLP speedup: 2.37-2.62x vs TRT FP8
+        # Expected pipeline: ~70-80ms (12-14 Hz)
+        **({"w4a16_tvm": W4A16TVMBackend,
+            "w4a16_tvm_freq1": lambda cfg: W4A16TVMBackend(cfg, kv_reuse_freq=1),
+            "w4a16_tvm_freq2": lambda cfg: W4A16TVMBackend(cfg, kv_reuse_freq=2),
+            "w4a16_tvm_freq3": lambda cfg: W4A16TVMBackend(cfg, kv_reuse_freq=3),
+            "w4a16_pytorch": lambda cfg: W4A16TVMBackend(cfg, use_tvm=False),
+           } if _w4a16_available else {}),
 
         # W8A16 TensorRT backends (has precision issues - use turbo_titan instead)
         "tensorrt_w8a16": TensorRTW8A16Backend,  # W8A16 KV Cache, 42ms, 0.046% error

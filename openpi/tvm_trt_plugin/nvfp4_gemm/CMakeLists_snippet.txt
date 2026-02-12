@@ -1,0 +1,22 @@
+# NVFP4_GEMM TVM Plugin - CMake Configuration
+
+# Add TVM-generated kernel
+add_library(nvfp4_gemm_tvm_plugin SHARED
+    nvfp4_gemm_kernel.cu
+    nvfp4_gemm_launcher.cu
+)
+
+target_include_directories(nvfp4_gemm_tvm_plugin PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${TENSORRT_INCLUDE_DIR}
+    ${CUDA_INCLUDE_DIRS}
+)
+
+target_link_libraries(nvfp4_gemm_tvm_plugin
+    ${TENSORRT_LIBRARIES}
+    ${CUDA_LIBRARIES}
+)
+
+set_target_properties(nvfp4_gemm_tvm_plugin PROPERTIES
+    CUDA_ARCHITECTURES "110"  # Jetson Thor SM110
+)

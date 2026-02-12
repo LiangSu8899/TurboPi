@@ -3,7 +3,6 @@ Inference Pipeline for Pi0.5 VLA Model.
 
 Provides:
 - UnifiedPolicy: Consistent API across PyTorch/TensorRT/Pipelined backends
-- HybridTensorRTPipeline: Complete inference with optional TensorRT acceleration
 - TensorRT pipelines: High-performance inference with CUDA stream parallelization
 
 Recommended Usage:
@@ -23,171 +22,119 @@ Recommended Usage:
     })
 """
 
+# All exports
+__all__ = []
+
 # TensorRT pipeline components
-from openpi.inference.trt_pipeline import (
-    PipelineConfig,
-    PipelineStats,
-    TensorRTEngineAsync,
-    TensorRTPipeline,
-    DoubleBuffer,
-    run_pipeline_benchmark,
-    print_comparison,
-)
-
-# Hybrid TensorRT + PyTorch pipeline (complete inference flow)
-from openpi.inference.hybrid_trt_pipeline import (
-    HybridTensorRTPipeline,
-    HybridPipelineConfig,
-    PipelineStats as HybridPipelineStats,
-)
-
-# Async PyTorch pipeline
-from openpi.inference.async_pipeline import (
-    AsyncVLAPipeline,
-)
+try:
+    from openpi.inference.trt_pipeline import (
+        PipelineConfig,
+        PipelineStats,
+        TensorRTEngineAsync,
+        TensorRTPipeline,
+        DoubleBuffer,
+        run_pipeline_benchmark,
+        print_comparison,
+    )
+    __all__.extend([
+        "PipelineConfig",
+        "PipelineStats",
+        "TensorRTEngineAsync",
+        "TensorRTPipeline",
+        "DoubleBuffer",
+        "run_pipeline_benchmark",
+        "print_comparison",
+    ])
+except ImportError:
+    pass
 
 # Unified policy interface (recommended for most use cases)
-from openpi.inference.unified_policy import (
-    UnifiedPolicy,
-    PolicyConfig,
-    PyTorchBackend,
-    PyTorchPipelinedBackend,
-    HybridTensorRTBackend,
-    TripleStreamBackend,
-    TorchTRTBackend,
-    FP8MLPBackend,
-    FlashFP8Backend,  # RECOMMENDED: Flash Attention + FP8 MLP
-)
+try:
+    from openpi.inference.unified_policy import (
+        UnifiedPolicy,
+        PolicyConfig,
+        PyTorchBackend,
+    )
+    __all__.extend([
+        "UnifiedPolicy",
+        "PolicyConfig",
+        "PyTorchBackend",
+    ])
 
-# Flash Attention + FP8 KV Cache (FASTEST on Thor)
-from openpi.inference.flash_fp8_kv_cache import (
-    FlashFP8KVCacheModel,
-    FlashFP8KVCacheEngine,
-    FlashFP8TransformerBlock,
-    FlashGQAAttention,
-    load_flash_fp8_weights,
-    benchmark_all_variants,
-)
+    # Optional backends in unified_policy
+    try:
+        from openpi.inference.unified_policy import PyTorchPipelinedBackend
+        __all__.append("PyTorchPipelinedBackend")
+    except ImportError:
+        pass
 
-# FP8 MLP (FP16 Attention + FP8 MLP using torch._scaled_mm)
-from openpi.inference.fp8_mlp import (
-    FP8MLP,
-    FP8Linear,
-    FP8HybridMLP,  # Recommended: FP8 gate/up, FP16 down
-    FP8MLPWithStaticScale,
-    quantize_weight_to_fp8,
-    quantize_activation_to_fp8,
-    benchmark_fp8_mlp,
-)
+    try:
+        from openpi.inference.unified_policy import HybridTensorRTBackend
+        __all__.append("HybridTensorRTBackend")
+    except ImportError:
+        pass
 
-# FP8 KV Cache (FP16 Attention + FP8 MLP)
-from openpi.inference.fp8_kv_cache import (
-    FP8KVCacheModel,
-    FP8KVCacheEngine,
-    FP8TransformerBlock,
-    load_fp8_weights,
-)
+    try:
+        from openpi.inference.unified_policy import TripleStreamBackend
+        __all__.append("TripleStreamBackend")
+    except ImportError:
+        pass
 
-# Torch-TensorRT KV Cache Engine
-from openpi.inference.torch_trt_kv_cache import (
-    TorchTRTKVCacheEngine,
-    create_torch_trt_engine,
-)
+    try:
+        from openpi.inference.unified_policy import TorchTRTBackend
+        __all__.append("TorchTRTBackend")
+    except ImportError:
+        pass
+
+    try:
+        from openpi.inference.unified_policy import FP8MLPBackend
+        __all__.append("FP8MLPBackend")
+    except ImportError:
+        pass
+
+    try:
+        from openpi.inference.unified_policy import FlashFP8Backend
+        __all__.append("FlashFP8Backend")
+    except ImportError:
+        pass
+
+except ImportError:
+    pass
+
+# W4A16 TVM Backend (FASTEST MLP - 2.37-2.62x vs TRT FP8)
+try:
+    from openpi.inference.w4a16_backend import (
+        W4A16TVMBackend,
+    )
+    __all__.append("W4A16TVMBackend")
+except ImportError:
+    W4A16TVMBackend = None
 
 # Torch-TensorRT FP8 KV Cache Engine (TRT FP8 MLP + Flash Attention)
-from openpi.inference.torch_trt_fp8_kv_cache import (
-    TorchTRTFP8KVCacheEngine,
-    TorchTRTFP8TransformerBlock,
-    TorchTRTFP8KVCacheModel,
-    SEQ_LEN as TORCH_TRT_FP8_SEQ_LEN,
-    HIDDEN_SIZE as TORCH_TRT_FP8_HIDDEN_SIZE,
-)
+try:
+    from openpi.inference.torch_trt_fp8_kv_cache import (
+        TorchTRTFP8KVCacheEngine,
+        TorchTRTFP8TransformerBlock,
+        TorchTRTFP8KVCacheModel,
+        SEQ_LEN as TORCH_TRT_FP8_SEQ_LEN,
+        HIDDEN_SIZE as TORCH_TRT_FP8_HIDDEN_SIZE,
+    )
+    __all__.extend([
+        "TorchTRTFP8KVCacheEngine",
+        "TorchTRTFP8TransformerBlock",
+        "TorchTRTFP8KVCacheModel",
+        "TORCH_TRT_FP8_SEQ_LEN",
+        "TORCH_TRT_FP8_HIDDEN_SIZE",
+    ])
+except ImportError:
+    pass
 
-# Triple Stream Pipeline (26+ Hz)
-from openpi.inference.triple_stream_pipeline import (
-    TripleStreamPipeline,
-    TripleStreamConfig,
-    PipelineStats as TriplePipelineStats,
-)
-
-# Triple Buffer
-from openpi.inference.triple_buffer import (
-    TripleBuffer,
-    TripleKVCacheBuffer,
-    KVCacheBuffer,
-)
-
-# KV Cache TensorRT
-from openpi.inference.kv_cache_trt import (
-    TensorRTKVCacheEngine,
-    PyTorchKVCacheEngine,
-    create_kv_cache_engine,
-)
-
-__all__ = [
-    # Recommended API
-    "UnifiedPolicy",
-    "PolicyConfig",
-    # Hybrid Pipeline (complete flow with optional TensorRT)
-    "HybridTensorRTPipeline",
-    "HybridPipelineConfig",
-    "HybridTensorRTBackend",
-    # Triple Stream Pipeline (26+ Hz)
-    "TripleStreamPipeline",
-    "TripleStreamConfig",
-    "TripleStreamBackend",
-    "TriplePipelineStats",
-    # Triple Buffer
-    "TripleBuffer",
-    "TripleKVCacheBuffer",
-    "KVCacheBuffer",
-    # KV Cache TensorRT
-    "TensorRTKVCacheEngine",
-    "PyTorchKVCacheEngine",
-    "create_kv_cache_engine",
-    # Torch-TensorRT KV Cache (recommended for Thor)
-    "TorchTRTBackend",
-    "TorchTRTKVCacheEngine",
-    "create_torch_trt_engine",
-    # Torch-TensorRT FP8 KV Cache (TRT FP8 MLP + Flash Attention)
-    "TorchTRTFP8KVCacheEngine",
-    "TorchTRTFP8TransformerBlock",
-    "TorchTRTFP8KVCacheModel",
-    "TORCH_TRT_FP8_SEQ_LEN",
-    "TORCH_TRT_FP8_HIDDEN_SIZE",
-    # FP8 MLP Backend (FP16 Attention + FP8 MLP)
-    "FP8MLPBackend",
-    "FP8MLP",
-    "FP8Linear",
-    "FP8HybridMLP",  # Recommended: 1.12x speedup
-    "FP8MLPWithStaticScale",
-    "FP8KVCacheModel",
-    "FP8KVCacheEngine",
-    "FP8TransformerBlock",
-    "quantize_weight_to_fp8",
-    "quantize_activation_to_fp8",
-    "load_fp8_weights",
-    "benchmark_fp8_mlp",
-    # Flash Attention + FP8 Backend (RECOMMENDED - FASTEST on Thor)
-    "FlashFP8Backend",
-    "FlashFP8KVCacheModel",
-    "FlashFP8KVCacheEngine",
-    "FlashFP8TransformerBlock",
-    "FlashGQAAttention",
-    "load_flash_fp8_weights",
-    "benchmark_all_variants",
-    # Async PyTorch Pipeline
-    "AsyncVLAPipeline",
-    # Backend classes
-    "PyTorchBackend",
-    "PyTorchPipelinedBackend",
-    # TensorRT internals
-    "PipelineConfig",
-    "PipelineStats",
-    "HybridPipelineStats",
-    "TensorRTEngineAsync",
-    "TensorRTPipeline",
-    "DoubleBuffer",
-    "run_pipeline_benchmark",
-    "print_comparison",
-]
+# W4A16 TVM KV Cache
+try:
+    from openpi.inference.w4a16_tvm_kv_cache import (
+        W4A16TVMKVCacheEngine,
+    )
+    __all__.append("W4A16TVMKVCacheEngine")
+except Exception:
+    # TVM may fail to load due to missing libraries
+    pass

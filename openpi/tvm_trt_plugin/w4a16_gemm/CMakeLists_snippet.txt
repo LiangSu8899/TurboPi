@@ -1,0 +1,22 @@
+# W4A16_GEMM TVM Plugin - CMake Configuration
+
+# Add TVM-generated kernel
+add_library(w4a16_gemm_tvm_plugin SHARED
+    w4a16_gemm_kernel.cu
+    w4a16_gemm_launcher.cu
+)
+
+target_include_directories(w4a16_gemm_tvm_plugin PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${TENSORRT_INCLUDE_DIR}
+    ${CUDA_INCLUDE_DIRS}
+)
+
+target_link_libraries(w4a16_gemm_tvm_plugin
+    ${TENSORRT_LIBRARIES}
+    ${CUDA_LIBRARIES}
+)
+
+set_target_properties(w4a16_gemm_tvm_plugin PROPERTIES
+    CUDA_ARCHITECTURES "110"  # Jetson Thor SM110
+)
