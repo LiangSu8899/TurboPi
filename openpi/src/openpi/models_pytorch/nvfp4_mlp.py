@@ -31,6 +31,21 @@ NVFP4_VALUES = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0])
 NVFP4_MAX = 6.0
 BLOCK_SIZE = 32
 
+# Triton 加速开关
+USE_TRITON = True  # 默认启用 Triton 加速
+
+# 尝试导入 Triton 实现
+_triton_available = False
+try:
+    from openpi.models_pytorch.nvfp4_triton import (
+        quantize_nvfp4_triton,
+        dequantize_nvfp4_triton,
+        quantize_and_pack_nvfp4_triton,
+    )
+    _triton_available = True
+except ImportError:
+    pass
+
 # CUTLASS tile 配置 (来自 sm100_blockscaled_layout.hpp)
 CUTLASS_ROW_TILE = 128  # Blk_MN
 CUTLASS_K_TILE = 4      # Blk_SF
@@ -74,7 +89,8 @@ def quantize_to_nvfp4_sim(
     tensor: torch.Tensor,
     block_size: int = BLOCK_SIZE,
     use_mse_search: bool = True,
-    mse_search_steps: int = 10
+    mse_search_steps: int = 10,
+    use_triton: bool = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     模拟 NVFP4 量化 (用于精度验证)。
@@ -86,10 +102,20 @@ def quantize_to_nvfp4_sim(
         block_size: block scaling 的块大小
         use_mse_search: 是否使用 MSE 搜索优化 scale (提升精度)
         mse_search_steps: MSE 搜索的步数 (越多越精确但越慢)
+        use_triton: 是否使用 Triton 加速 (None = 自动检测)
 
     Returns:
         (quantized, scales): 量化后的张量和 scale factors
     """
+    # 决定是否使用 Triton
+    if use_triton is None:
+        use_triton = USE_TRITON and _triton_available
+
+    # 如果使用 Triton 且不需要 MSE search，直接调用 Triton kernel
+    if use_triton and _triton_available and not use_mse_search:
+        return quantize_nvfp4_triton(tensor.float(), block_size)
+
+    # Python fallback 实现
     M, K = tensor.shape
     device = tensor.device
     dtype = tensor.dtype
@@ -151,7 +177,8 @@ def dequantize_nvfp4_sim(
     quantized: torch.Tensor,
     scales: torch.Tensor,
     block_size: int = BLOCK_SIZE,
-    use_fp8_scales: bool = False
+    use_fp8_scales: bool = False,
+    use_triton: bool = None,
 ) -> torch.Tensor:
     """
     反量化 NVFP4 到原始 scale。
@@ -163,10 +190,20 @@ def dequantize_nvfp4_sim(
         use_fp8_scales: 如果 True，先将 scales 转换为 FP8 再使用。
                         这模拟 CUTLASS 的行为，用于精确对比。
                         FP8 E4M3 会引入量化误差（例如 0.167 -> 0.172）。
+        use_triton: 是否使用 Triton 加速 (None = 自动检测)
 
     Returns:
         [M, K] 反量化的数据
     """
+    # 决定是否使用 Triton
+    if use_triton is None:
+        use_triton = USE_TRITON and _triton_available
+
+    # 如果使用 Triton 且不需要 FP8 scale 模拟
+    if use_triton and _triton_available and not use_fp8_scales:
+        return dequantize_nvfp4_triton(quantized.float(), scales, block_size, quantized.dtype)
+
+    # Python fallback 实现
     M, K = quantized.shape
     quantized_blocked = quantized.view(M, -1, block_size)
 
@@ -436,6 +473,7 @@ class NVFP4Linear(nn.Module):
         # 量化后的权重缓存 (模拟模式)
         self.register_buffer('weight_q', None)
         self.register_buffer('weight_scales', None)
+        self.register_buffer('weight_dequant', None)  # 缓存反量化后的权重
 
         # CUTLASS 模式的缓存
         self.register_buffer('weight_packed', None)      # packed NVFP4
@@ -443,6 +481,7 @@ class NVFP4Linear(nn.Module):
 
         self._quantized = False
         self._cutlass_prepared = False
+        self._dequant_cached = False  # 是否已缓存反量化权重
 
         # 尝试加载 CUTLASS extension
         self._nvfp4_ext = None
@@ -469,9 +508,17 @@ class NVFP4Linear(nn.Module):
         cls,
         linear: nn.Linear,
         block_size: int = BLOCK_SIZE,
-        use_cutlass: bool = False
+        use_cutlass: bool = False,
+        cache_dequantized: bool = True,
     ) -> 'NVFP4Linear':
-        """从 nn.Linear 创建 NVFP4Linear。"""
+        """从 nn.Linear 创建 NVFP4Linear。
+
+        Args:
+            linear: 原始 nn.Linear 层
+            block_size: NVFP4 block size
+            use_cutlass: 是否使用 CUTLASS NVFP4 GEMM
+            cache_dequantized: 是否缓存反量化后的权重 (用于 simulation 模式加速)
+        """
         layer = cls(
             linear.in_features,
             linear.out_features,
@@ -484,21 +531,33 @@ class NVFP4Linear(nn.Module):
             if linear.bias is not None:
                 layer.bias.copy_(linear.bias)
 
-        # 预量化权重
-        layer.quantize_weights()
+        # 预量化权重 (带缓存)
+        layer.quantize_weights(cache_dequantized=cache_dequantized)
 
         if use_cutlass:
             layer.prepare_for_cutlass()
 
         return layer
 
-    def quantize_weights(self):
-        """预量化权重 (模拟模式)。"""
+    def quantize_weights(self, cache_dequantized: bool = True):
+        """预量化权重 (模拟模式)。
+
+        Args:
+            cache_dequantized: 是否缓存反量化后的权重 (用于加速 simulation forward)
+        """
         with torch.no_grad():
             self.weight_q, self.weight_scales = quantize_to_nvfp4_sim(
                 self.weight.data, self.block_size
             )
             self._quantized = True
+
+            # 缓存反量化后的权重 (避免每次 forward 都重新计算)
+            if cache_dequantized:
+                self.weight_dequant = dequantize_nvfp4_sim(
+                    self.weight_q, self.weight_scales, self.block_size,
+                    use_fp8_scales=True
+                ).float()
+                self._dequant_cached = True
 
     def prepare_for_cutlass(self):
         """
@@ -548,12 +607,24 @@ class NVFP4Linear(nn.Module):
         FP8_SCALE_MAX = 448.0 * NVFP4_MAX  # 2688
         x_2d = x_2d.clamp(-FP8_SCALE_MAX, FP8_SCALE_MAX)
 
-        # 量化输入
-        x_q, x_scales = quantize_to_nvfp4_sim(x_2d, self.block_size)
+        # 量化输入 (不使用 MSE search - 只用于权重离线量化)
+        # 使用 Triton 加速 (如果可用)
+        x_q, x_scales = quantize_to_nvfp4_sim(
+            x_2d, self.block_size,
+            use_mse_search=False,  # MSE search 只用于权重
+            use_triton=True,       # 使用 Triton 加速
+        )
 
-        # 反量化并计算 (使用 float32 确保精度, 使用 FP8 scales 匹配 CUTLASS)
+        # 反量化输入 (使用 FP8 scales 匹配 CUTLASS)
         x_dequant = dequantize_nvfp4_sim(x_q, x_scales, self.block_size, use_fp8_scales=True).float()
-        w_dequant = dequantize_nvfp4_sim(self.weight_q, self.weight_scales, self.block_size, use_fp8_scales=True).float()
+
+        # 使用缓存的反量化权重 (避免每次 forward 都重新计算)
+        if self._dequant_cached and self.weight_dequant is not None:
+            w_dequant = self.weight_dequant.float()
+        else:
+            w_dequant = dequantize_nvfp4_sim(
+                self.weight_q, self.weight_scales, self.block_size, use_fp8_scales=True
+            ).float()
 
         bias = self.bias.float() if self.bias is not None else None
         out = F.linear(x_dequant, w_dequant, bias)
@@ -574,8 +645,12 @@ class NVFP4Linear(nn.Module):
         FP8_SCALE_MAX = 448.0 * NVFP4_MAX  # 2688
         x_2d = x_2d.clamp(-FP8_SCALE_MAX, FP8_SCALE_MAX)
 
-        # 量化输入
-        x_q, x_scales = quantize_to_nvfp4_sim(x_2d, self.block_size)
+        # 量化输入 (使用 Triton 加速)
+        x_q, x_scales = quantize_to_nvfp4_sim(
+            x_2d, self.block_size,
+            use_mse_search=False,
+            use_triton=True,
+        )
 
         # 打包输入
         x_packed = pack_nvfp4_data(x_q, self.block_size)

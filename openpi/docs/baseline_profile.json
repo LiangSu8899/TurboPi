@@ -1,0 +1,132 @@
+{
+  "1_steps": {
+    "e2e_total": {
+      "mean": 83.50,
+      "std": 0.5,
+      "min": 82.8,
+      "max": 84.5
+    },
+    "vision": {
+      "mean_ms": 17.26,
+      "std_ms": 0.1,
+      "pct": 20.7
+    },
+    "kv_cache": {
+      "mean_ms": 52.14,
+      "std_ms": 0.1,
+      "pct": 62.4
+    },
+    "denoise": {
+      "mean_ms": 10.10,
+      "std_ms": 0.05,
+      "pct": 12.1
+    },
+    "hz": 12.0,
+    "accuracy": "100%"
+  },
+  "2_steps": {
+    "e2e_total": {
+      "mean": 93.07
+    },
+    "vision": {
+      "mean_ms": 17.12,
+      "pct": 18.4
+    },
+    "kv_cache": {
+      "mean_ms": 52.13,
+      "pct": 56.0
+    },
+    "denoise": {
+      "mean_ms": 19.70,
+      "pct": 21.2
+    },
+    "hz": 10.7,
+    "accuracy": "100%"
+  },
+  "3_steps": {
+    "e2e_total": {
+      "mean": 102.81,
+      "std": 0.6,
+      "min": 101.5,
+      "max": 104.2
+    },
+    "vision": {
+      "mean_ms": 17.22,
+      "std_ms": 0.1,
+      "pct": 16.7
+    },
+    "kv_cache": {
+      "mean_ms": 52.14,
+      "std_ms": 0.1,
+      "pct": 50.7
+    },
+    "denoise": {
+      "mean_ms": 29.38,
+      "std_ms": 0.2,
+      "pct": 28.6
+    },
+    "hz": 9.7,
+    "accuracy": "100%"
+  },
+  "5_steps": {
+    "e2e_total": {
+      "mean": 122.21
+    },
+    "vision": {
+      "mean_ms": 17.22,
+      "pct": 14.1
+    },
+    "kv_cache": {
+      "mean_ms": 52.23,
+      "pct": 42.7
+    },
+    "denoise": {
+      "mean_ms": 48.87,
+      "pct": 40.0
+    },
+    "hz": 8.2,
+    "accuracy": "100%"
+  },
+  "10_steps": {
+    "e2e_total": {
+      "mean": 171.36,
+      "std": 0.8,
+      "min": 169.5,
+      "max": 173.2
+    },
+    "vision": {
+      "mean_ms": 17.26,
+      "std_ms": 0.1,
+      "pct": 10.1
+    },
+    "kv_cache": {
+      "mean_ms": 52.13,
+      "std_ms": 0.1,
+      "pct": 30.4
+    },
+    "denoise": {
+      "mean_ms": 97.69,
+      "std_ms": 0.3,
+      "pct": 57.0
+    },
+    "hz": 5.8,
+    "accuracy": "100%"
+  },
+  "_metadata": {
+    "source": "debug-07.md",
+    "timestamp": "2026-02-12",
+    "tag": "v1.2.0_full_optimized",
+    "validation": "LIBERO spatial (3 tasks × 3 trials)",
+    "checkpoint": "pi05_libero",
+    "backend": "full_optimized",
+    "optimizations": {
+      "vision": "TRT_FP16 (torch_tensorrt.compile)",
+      "kv_cache": "TRT_FP8_MLP + Flash_Attention (ModelOpt + torch_tensorrt)",
+      "denoise": "CUDA_Graph (torch.cuda.CUDAGraph)"
+    },
+    "denoise_model": {
+      "formula": "time_ms = 10.1 × steps",
+      "per_step_ms": 10.1
+    }
+  }
+}
