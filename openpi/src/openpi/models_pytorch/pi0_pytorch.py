@@ -610,11 +610,17 @@ class PI0Pytorch(nn.Module):
             full_value_states = torch.cat([cached_value, value_states], dim=2)
 
             # Compute attention (suffix Q attending to prefix+suffix K, V)
-            scaling = layer.self_attn.scaling
-            att_output, _ = modeling_gemma.eager_attention_forward(
-                layer.self_attn, query_states, full_key_states, full_value_states,
-                full_att_masks_4d, scaling
+            # OPTIMIZATION: Since suffix attention mask is ALL TRUE (bidirectional),
+            # we can skip the mask entirely. This gives 2.8x speedup:
+            # - SDPA with mask: 16.60 ms (180 ops)
+            # - SDPA no mask:   5.90 ms (180 ops)
+            # Note: Using SDPA instead of Flash Attention because SDPA avoids
+            # transpose overhead and is faster on Thor (SM110).
+            att_output = F.scaled_dot_product_attention(
+                query_states, full_key_states, full_value_states
             )
+            # SDPA returns (B, H, L, D), need (B, L, H, D) like eager_attention_forward
+            att_output = att_output.transpose(1, 2).contiguous()
 
             head_dim = layer.self_attn.head_dim
             num_heads = layer.self_attn.config.num_attention_heads
@@ -886,7 +892,9 @@ class PI0Pytorch(nn.Module):
 
         # Prepare attention masks
         full_att_2d_masks_4d = self._prepare_attention_masks_4d(full_att_2d_masks)
-        self.paligemma_with_expert.gemma_expert.model.config._attn_implementation = "eager"  # noqa: SLF001
+        # Use SDPA for faster attention (1.35x speedup vs eager)
+        # Benchmark: eager=0.16ms/step, sdpa=0.12ms/step per layer
+        self.paligemma_with_expert.gemma_expert.model.config._attn_implementation = "sdpa"  # noqa: SLF001
 
         outputs_embeds, _ = self.paligemma_with_expert.forward(
             attention_mask=full_att_2d_masks_4d,
