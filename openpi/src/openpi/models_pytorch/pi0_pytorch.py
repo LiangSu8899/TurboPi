@@ -654,6 +654,185 @@ class PI0Pytorch(nn.Module):
         return self.action_out_proj(suffix_out)
 
     @torch.no_grad()
+    def denoise_step_graphed(
+        self,
+        x_t: Tensor,
+        suffix_position_ids: Tensor,
+        adarms_cond: Tensor,
+        prefix_kv_cache: list[tuple[Tensor, Tensor]],
+    ) -> Tensor:
+        """CUDA Graph-compatible denoise step.
+
+        This version avoids dynamic tensor creation, making it suitable for
+        CUDA Graph capture. All static tensors (position_ids, adarms_cond)
+        must be pre-computed and passed in.
+
+        Args:
+            x_t: (B, action_horizon, action_dim) - noisy actions
+            suffix_position_ids: (B, suffix_len) - pre-computed position IDs
+            adarms_cond: (B, hidden_size) - pre-computed timestep conditioning
+            prefix_kv_cache: List of (K, V) tuples from compute_prefix_kv_cache
+
+        Returns:
+            (B, action_horizon, action_dim) - velocity prediction
+        """
+        from transformers.models.gemma import modeling_gemma
+
+        # Get models
+        gemma_expert = self.paligemma_with_expert.gemma_expert.model
+        paligemma_lm = self.paligemma_with_expert.paligemma.language_model
+        num_layers = gemma_expert.config.num_hidden_layers
+
+        batch_size = x_t.shape[0]
+
+        # Embed actions (no dynamic tensor creation here)
+        model_dtype = self.action_in_proj.weight.dtype
+        action_emb = self.action_in_proj(x_t.to(model_dtype))
+
+        # For pi05, suffix_embs is just action_emb
+        suffix_embs = action_emb
+
+        # Convert to bfloat16 if needed
+        if gemma_expert.layers[0].self_attn.q_proj.weight.dtype == torch.bfloat16:
+            suffix_embs = suffix_embs.to(dtype=torch.bfloat16)
+
+        hidden_states = suffix_embs
+
+        for layer_idx in range(num_layers):
+            layer = gemma_expert.layers[layer_idx]
+            cached_key, cached_value = prefix_kv_cache[layer_idx]
+
+            # Input layernorm with adaRMS conditioning
+            normed_hidden, gate = layer.input_layernorm(hidden_states, cond=adarms_cond)
+
+            # Compute Q, K, V for suffix only
+            input_shape = normed_hidden.shape[:-1]
+            hidden_shape = (*input_shape, -1, layer.self_attn.head_dim)
+
+            query_states = layer.self_attn.q_proj(normed_hidden).view(hidden_shape).transpose(1, 2)
+            key_states = layer.self_attn.k_proj(normed_hidden).view(hidden_shape).transpose(1, 2)
+            value_states = layer.self_attn.v_proj(normed_hidden).view(hidden_shape).transpose(1, 2)
+
+            # Apply RoPE - use zeros tensor (same as denoise_step_with_cache)
+            dummy_tensor = torch.zeros(
+                query_states.shape[0], query_states.shape[2], query_states.shape[-1],
+                device=query_states.device, dtype=query_states.dtype
+            )
+            cos, sin = paligemma_lm.rotary_emb(dummy_tensor, suffix_position_ids)
+            query_states, key_states = modeling_gemma.apply_rotary_pos_emb(
+                query_states, key_states, cos, sin, unsqueeze_dim=1
+            )
+
+            # Concatenate cached prefix K, V with suffix K, V
+            full_key_states = torch.cat([cached_key, key_states], dim=2)
+            full_value_states = torch.cat([cached_value, value_states], dim=2)
+
+            # SDPA attention (no mask - see SDPA optimization)
+            att_output = F.scaled_dot_product_attention(
+                query_states, full_key_states, full_value_states
+            )
+            att_output = att_output.transpose(1, 2).contiguous()
+
+            head_dim = layer.self_attn.head_dim
+            num_heads = layer.self_attn.config.num_attention_heads
+            att_output = att_output.reshape(batch_size, -1, num_heads * head_dim)
+
+            if att_output.dtype != layer.self_attn.o_proj.weight.dtype:
+                att_output = att_output.to(layer.self_attn.o_proj.weight.dtype)
+            out_emb = layer.self_attn.o_proj(att_output)
+
+            # First residual with gating
+            out_emb = modeling_gemma._gated_residual(hidden_states, out_emb, gate)
+            after_first_residual = out_emb.clone()
+
+            # Post-attention layernorm with adaRMS
+            out_emb, gate = layer.post_attention_layernorm(out_emb, cond=adarms_cond)
+            if layer.mlp.up_proj.weight.dtype == torch.bfloat16:
+                out_emb = out_emb.to(dtype=torch.bfloat16)
+
+            # MLP
+            out_emb = layer.mlp(out_emb)
+
+            # Second residual with gating
+            hidden_states = modeling_gemma._gated_residual(after_first_residual, out_emb, gate)
+
+        # Final norm
+        hidden_states, _ = gemma_expert.norm(hidden_states, cond=adarms_cond)
+
+        # Extract action tokens and project
+        suffix_out = hidden_states[:, -self.config.action_horizon:]
+        suffix_out = suffix_out.to(dtype=self.action_out_proj.weight.dtype)
+        return self.action_out_proj(suffix_out)
+
+    def precompute_graph_tensors(
+        self,
+        batch_size: int,
+        prefix_len: int,
+        num_steps: int = 10,
+        device: torch.device = None,
+    ) -> dict:
+        """Pre-compute static tensors for CUDA Graph capture.
+
+        Returns a dict with all pre-computed tensors needed for graphed denoise:
+        - suffix_position_ids: (B, action_horizon) position IDs
+        - adarms_conds: List of (B, hidden_size) for each timestep
+        - timestep_values: List of timestep values [1.0, 0.9, ..., 0.1]
+
+        Args:
+            batch_size: Batch size
+            prefix_len: Length of prefix (from prefix_pad_masks.shape[1])
+            num_steps: Number of denoising steps (default 10)
+            device: CUDA device
+
+        Returns:
+            Dict with pre-computed tensors
+        """
+        # create_sinusoidal_pos_embedding is defined in this file
+        if device is None:
+            device = next(self.parameters()).device
+
+        model_dtype = self.action_in_proj.weight.dtype
+        action_horizon = self.config.action_horizon
+
+        # Compute suffix position IDs (fixed for all steps)
+        # Position IDs continue from prefix
+        suffix_position_ids = torch.arange(
+            prefix_len, prefix_len + action_horizon,
+            device=device, dtype=torch.long
+        ).unsqueeze(0).expand(batch_size, -1)
+
+        # Pre-compute adarms_cond for each timestep
+        dt = -1.0 / num_steps
+        timestep_values = [1.0 + i * dt for i in range(num_steps)]
+        adarms_conds = []
+
+        for t_val in timestep_values:
+            timestep = torch.tensor([t_val] * batch_size, dtype=torch.float32, device=device)
+
+            # Sinusoidal embedding
+            time_emb = create_sinusoidal_pos_embedding(
+                timestep, self.action_in_proj.out_features,
+                min_period=4e-3, max_period=4.0, device=device
+            )
+            time_emb = time_emb.to(dtype=model_dtype)
+
+            # Time MLP (for pi05)
+            with torch.no_grad():
+                x = self.time_mlp_in(time_emb)
+                x = F.silu(x)
+                x = self.time_mlp_out(x)
+                adarms_cond = F.silu(x)
+
+            adarms_conds.append(adarms_cond)
+
+        return {
+            "suffix_position_ids": suffix_position_ids,
+            "adarms_conds": adarms_conds,
+            "timestep_values": timestep_values,
+            "dt": dt,
+        }
+
+    @torch.no_grad()
     def sample_actions(self, device, observation, noise=None, num_steps=10, use_kv_cache=True) -> Tensor:
         """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)
 

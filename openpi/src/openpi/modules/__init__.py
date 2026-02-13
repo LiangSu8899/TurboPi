@@ -6,7 +6,23 @@ This package contains optimized modules for high-performance inference:
 - static_diffusion: Unrolled denoising loops for CUDA Graph
 """
 
-from .w4a16_linear import W4A16Linear
+import os
+
+# Lazy import W4A16Linear to avoid TVM dependency when not needed
+def __getattr__(name):
+    if name == "W4A16Linear":
+        from .w4a16_linear import W4A16Linear
+        return W4A16Linear
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+# Only import W4A16Linear if TVM is available
+_W4A16Linear = None
+if os.environ.get("OPENPI_SKIP_TVM") != "1":
+    try:
+        from .w4a16_linear import W4A16Linear as _W4A16Linear
+    except (ImportError, OSError):
+        pass  # TVM not available
+
 from .static_vlm import (
     StaticKVCache,
     StaticKVCacheConfig,
@@ -19,6 +35,11 @@ from .static_diffusion import (
     UnrolledDenoiseLoop,
     CapturedDenoiseChain,
     FullGraphedDenoise,
+)
+from .graphed_denoise import (
+    GraphedDenoiseConfig,
+    GraphedDenoiseLoop,
+    ChainedDenoiseGraphs,
 )
 
 __all__ = [
@@ -35,4 +56,8 @@ __all__ = [
     "UnrolledDenoiseLoop",
     "CapturedDenoiseChain",
     "FullGraphedDenoise",
+    # Graphed Denoise
+    "GraphedDenoiseConfig",
+    "GraphedDenoiseLoop",
+    "ChainedDenoiseGraphs",
 ]
