@@ -82,15 +82,23 @@ class ChainedDenoiseGraphs(nn.Module):
 - **Cosine similarity**: 1.000 (perfect directional match)
 - **Max diff**: ~0.13 (within BF16 accumulated precision tolerance)
 
-## Combined Optimizations
+## Combined Optimizations (Denoise Only)
 
-| Optimization | Savings | Cumulative |
-|-------------|---------|------------|
-| Baseline TRT FP8 | - | 180 ms |
-| SDPA no-mask | ~10 ms | 170 ms |
-| CUDA Graph | ~73 ms | **97 ms** |
+| Optimization | Savings | Denoise Time |
+|-------------|---------|--------------|
+| Baseline (no graph) | - | ~186 ms |
+| CUDA Graph | ~88 ms | **~98 ms** |
 
-**Target achieved**: ~10 Hz inference (100 ms/frame)
+**Note**: This is Denoise component only. Full pipeline latency:
+
+| Component | Latency |
+|-----------|---------|
+| Vision TRT FP16 | 17 ms |
+| KV Cache TRT FP8 | 54 ms |
+| Denoise CUDA Graph | 98 ms |
+| **Total** | **~170 ms (5.9 Hz)** |
+
+**Target**: 10 Hz (100 ms) - Gap: 70 ms
 
 ## Usage
 
@@ -123,8 +131,62 @@ actions = graphed(noise)
 - `openpi/scripts/test_chained_denoise_graphs.py`
   - Test and benchmark script
 
+## Python-Level Optimization Analysis (2026-02-13)
+
+### Tested Optimizations (INEFFECTIVE in CUDA Graph)
+
+| 优化方案 | 独立测试 | 端到端测试 | 结论 |
+|----------|----------|------------|------|
+| **adaRMS BF16** | 节省 12.66 ms | **变慢 -3 ms** | ❌ 无效 |
+| **RoPE 预计算** | 节省 15.69 ms | **变慢 -0.6 ms** | ❌ 无效 |
+
+### 原因分析
+
+1. **CUDA Graph 内部优化 vs Python 层面优化**
+   - 独立组件测试未使用 CUDA Graph，测量的是 kernel launch overhead + 计算时间
+   - CUDA Graph 消除了 kernel launch overhead (~82 ms)
+   - 剩余时间 (~109 ms) 是纯 GPU 计算，无法通过 Python 层面优化
+
+2. **实际时间分解 (无 CUDA Graph)**
+   ```
+   组件                    占比
+   ─────────────────────────────
+   adaRMS LayerNorm        35.2%
+   Attention (SDPA)        27.6%
+   RoPE                    15.6%
+   MLP                      9.5%
+   Kernel Launch Overhead  ~43% (被 CUDA Graph 消除)
+   ```
+
+3. **实际时间分解 (CUDA Graph)**
+   ```
+   Denoise 10 步: 108.96 ms
+   = 纯 GPU 计算，Python 层面无法优化
+   ```
+
+### 结论
+
+**Python 层面的 dtype 转换/预计算优化在 CUDA Graph 模式下无效。**
+
+进一步优化需要：
+1. **Triton Fused Kernel**: 融合 adaRMS + RoPE + Attention
+2. **减少 prefix_len**: 当前 968 tokens，减少可显著降低 Attention 计算量
+3. **TensorRT 编译**: 将 Denoise 部分编译成 TRT engine
+
+### 当前状态
+
+| 组件 | 延迟 | 状态 |
+|------|------|------|
+| Vision TRT FP16 | 17 ms | ✓ |
+| KV Cache TRT FP8 | 54 ms | ✓ |
+| Denoise CUDA Graph | **109 ms** | 需优化 |
+| **Total** | **180 ms (5.6 Hz)** | |
+
+**Target**: 10 Hz (100 ms) - Gap: 80 ms
+
 ## Next Steps
 
-1. Integrate into UnifiedPolicy for automatic graph capture
-2. Add KV cache update for multi-frame inference
-3. Profile end-to-end with Vision + KV Cache + Denoise
+1. ~~Integrate into UnifiedPolicy for automatic graph capture~~ (低优先级)
+2. **探索 Triton Fused Kernel** - 融合 LayerNorm + Attention
+3. **减少 prefix_len** - 分析是否可以动态裁剪
+4. **TensorRT Denoise** - 完整编译成 TRT engine

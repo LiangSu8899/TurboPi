@@ -1,149 +1,203 @@
 #!/usr/bin/env python3
-"""
-Simple Denoise Profiling with NVTX Markers.
-
-Uses the existing FullOptimizedPolicy but adds NVTX markers
-to profile kernel gaps and identify bottlenecks.
-
-Usage:
-    nsys profile --trace=cuda,nvtx,osrt,cudnn,cublas \
-        --output=denoise_profile \
-        python scripts/profile_denoise_simple.py --steps 10
-
-Author: Turbo-Pi Team
-Date: 2026-02-12
-"""
+"""Simple profiling of Denoise - compare with/without CUDA Graph."""
 
 import sys
 import os
-import time
-import pathlib
-import logging
-import argparse
+script_dir = os.path.dirname(os.path.abspath(__file__))
+workspace_dir = os.path.dirname(script_dir)
+sys.path.insert(0, os.path.join(workspace_dir, 'src'))
+os.environ['OPENPI_SKIP_TVM'] = '1'
+os.chdir(workspace_dir)
 
-import numpy as np
 import torch
+import time
+import numpy as np
 
-# Setup paths
-script_dir = pathlib.Path(__file__).parent
-sys.path.insert(0, str(script_dir.parent / "src"))
-
-# Disable cuDNN for Jetson
 torch.backends.cudnn.enabled = False
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
+print('=' * 70)
+print('Denoise 性能对比 (CUDA Graph vs 无 Graph)')
+print('=' * 70)
+
+device = torch.device('cuda')
+
+# Load model
+from openpi.inference.unified_policy import UnifiedPolicy
+
+print('\n加载模型...')
+policy = UnifiedPolicy(
+    checkpoint_dir='/root/.cache/openpi/pytorch_checkpoints/pi05_libero',
+    backend='pytorch',
+    num_denoising_steps=10,
+    device='cuda',
 )
-logger = logging.getLogger(__name__)
+policy.warmup(num_iterations=2)
+model = policy.backend.model
 
+# Prepare test data
+test_obs = {
+    'observation/image': np.random.randint(0, 255, (224, 224, 3), dtype=np.uint8),
+    'observation/wrist_image': np.random.randint(0, 255, (224, 224, 3), dtype=np.uint8),
+    'observation/state': np.zeros(8, dtype=np.float32),
+    'prompt': 'pick up the bowl',
+}
 
-def nvtx_range(name: str):
-    """NVTX range context manager."""
-    class NVTXRange:
-        def __enter__(self):
-            torch.cuda.nvtx.range_push(name)
-            return self
-        def __exit__(self, *args):
-            torch.cuda.nvtx.range_pop()
-    return NVTXRange()
+obs = policy.backend._preprocess(test_obs)
+images, img_masks, lang_tokens, lang_masks, state = model._preprocess_observation(obs, train=False)
+prefix_embs, prefix_pad_masks, prefix_att_masks = model.embed_prefix(images, img_masks, lang_tokens, lang_masks)
+prefix_kv_cache = model.compute_prefix_kv_cache(prefix_embs, prefix_pad_masks, prefix_att_masks)
 
+action_horizon = model.config.action_horizon
+action_dim = model.config.action_dim
+prefix_len = prefix_pad_masks.shape[1]
 
-def run_profiling(checkpoint_dir: str, num_steps: int, warmup: int, iterations: int):
-    """Run profiling using FullOptimizedPolicy."""
-    from libero_eval_full_optimized import FullOptimizedPolicy
+print(f'\n配置:')
+print(f'  prefix_len: {prefix_len}')
+print(f'  action_horizon: {action_horizon}')
+print(f'  action_dim: {action_dim}')
+print(f'  num_denoising_steps: 10')
 
-    device = "cuda"
+# 1. Test without CUDA Graph (10 steps loop)
+print('\n' + '=' * 70)
+print('1. 无 CUDA Graph (10 步循环)')
+print('=' * 70)
 
-    logger.info("=" * 70)
-    logger.info(f"Denoise Profiling: {num_steps} steps, {iterations} iterations")
-    logger.info("=" * 70)
+def run_denoise_loop(model, state, x_t, prefix_kv_cache, prefix_pad_masks, num_steps=10):
+    """Run denoise loop without CUDA graph."""
+    dt = 1.0 / num_steps
+    for i in range(num_steps):
+        t = torch.tensor([1.0 - i * dt], device=x_t.device, dtype=torch.float32)
+        with torch.no_grad():
+            v_t = model.denoise_step_with_cache(
+                state=state,
+                prefix_kv_cache=prefix_kv_cache,
+                prefix_pad_masks=prefix_pad_masks,
+                x_t=x_t,
+                timestep=t,
+            )
+        x_t = x_t + v_t * dt
+    return x_t
 
-    # Create policy
-    logger.info("Loading FullOptimizedPolicy...")
-    policy = FullOptimizedPolicy(
-        checkpoint_dir=checkpoint_dir,
-        device=device,
-        num_denoising_steps=num_steps,
-    )
+x_t = torch.randn(1, action_horizon, action_dim, device=device, dtype=torch.bfloat16)
 
-    # Create dummy observation
-    obs_dict = {
-        "observation/image": np.random.randint(0, 255, (224, 224, 3), dtype=np.uint8),
-        "observation/wrist_image": np.random.randint(0, 255, (224, 224, 3), dtype=np.uint8),
-        "observation/state": np.random.randn(8).astype(np.float32),
-        "prompt": "pick up the black bowl",
-    }
+# Warmup
+for _ in range(3):
+    _ = run_denoise_loop(model, state, x_t.clone(), prefix_kv_cache, prefix_pad_masks)
+torch.cuda.synchronize()
 
-    # Warmup
-    logger.info(f"Warming up ({warmup} iterations)...")
-    for _ in range(warmup):
-        _ = policy.infer(obs_dict)
+# Benchmark
+runs = 20
+start = time.perf_counter()
+for _ in range(runs):
+    _ = run_denoise_loop(model, state, x_t.clone(), prefix_kv_cache, prefix_pad_masks)
+torch.cuda.synchronize()
+no_graph_ms = (time.perf_counter() - start) / runs * 1000
+
+print(f'  无 CUDA Graph: {no_graph_ms:.2f} ms (10 steps)')
+
+# 2. Test with ChainedDenoiseGraphs
+print('\n' + '=' * 70)
+print('2. 使用 ChainedDenoiseGraphs')
+print('=' * 70)
+
+try:
+    from openpi.modules.graphed_denoise import ChainedDenoiseGraphs
+
+    # Create and capture
+    chained = ChainedDenoiseGraphs(model=model, num_steps=10, device=device)
+    chained.capture(state, prefix_kv_cache, prefix_pad_masks, warmup_iters=3)
+
+    # Warmup - forward only takes noise tensor
+    for _ in range(5):
+        _ = chained.forward(x_t.clone())
     torch.cuda.synchronize()
 
-    # Profile iterations with NVTX
-    logger.info(f"Profiling ({iterations} iterations)...")
-    latencies = []
+    # Benchmark
+    start = time.perf_counter()
+    for _ in range(runs):
+        _ = chained.forward(x_t.clone())
+    torch.cuda.synchronize()
+    chained_ms = (time.perf_counter() - start) / runs * 1000
 
-    for i in range(iterations):
-        torch.cuda.nvtx.mark(f"Iteration_{i}_Start")
+    print(f'  ChainedDenoiseGraphs: {chained_ms:.2f} ms (10 steps)')
+    print(f'  加速: {no_graph_ms / chained_ms:.2f}x')
+    print(f'  节省: {no_graph_ms - chained_ms:.2f} ms')
 
-        torch.cuda.synchronize()
-        start = time.perf_counter()
+    graph_speedup = no_graph_ms / chained_ms
+    graph_savings = no_graph_ms - chained_ms
 
-        with nvtx_range(f"Iteration_{i}"):
-            with nvtx_range("E2E_Inference"):
-                result = policy.infer(obs_dict)
+except Exception as e:
+    print(f'  ChainedDenoiseGraphs 失败: {e}')
+    import traceback
+    traceback.print_exc()
+    chained_ms = no_graph_ms
+    graph_speedup = 1.0
+    graph_savings = 0.0
 
-        torch.cuda.synchronize()
-        elapsed = (time.perf_counter() - start) * 1000
-        latencies.append(elapsed)
+# 3. CUDA Event profiling for single step
+print('\n' + '=' * 70)
+print('3. 单步时间分解 (CUDA Events)')
+print('=' * 70)
 
-        torch.cuda.nvtx.mark(f"Iteration_{i}_End")
+def profile_with_cuda_events(name, func, runs=50):
+    """Profile a function using CUDA events."""
+    # Warmup
+    for _ in range(10):
+        func()
+    torch.cuda.synchronize()
 
-    # Report
-    latencies = np.array(latencies)
-    logger.info("=" * 70)
-    logger.info("Profiling Results")
-    logger.info("=" * 70)
-    logger.info(f"  Mean: {latencies.mean():.2f} ms")
-    logger.info(f"  Std:  {latencies.std():.2f} ms")
-    logger.info(f"  Min:  {latencies.min():.2f} ms")
-    logger.info(f"  Max:  {latencies.max():.2f} ms")
-    logger.info(f"  Per-step: {latencies.mean() / num_steps:.2f} ms/step (denoise only estimate)")
-    logger.info("=" * 70)
+    # Profile
+    start_events = [torch.cuda.Event(enable_timing=True) for _ in range(runs)]
+    end_events = [torch.cuda.Event(enable_timing=True) for _ in range(runs)]
 
-    # Get component breakdown
-    stats = policy.get_latency_stats()
-    logger.info("\nComponent Breakdown:")
-    for name in ['vision', 'kv_cache', 'denoise']:
-        if name in stats.get('components', {}):
-            comp = stats['components'][name]
-            logger.info(f"  {name}: {comp.get('mean_ms', 0):.2f} ms")
+    for i in range(runs):
+        start_events[i].record()
+        func()
+        end_events[i].record()
 
-    return latencies
+    torch.cuda.synchronize()
+    times = [start_events[i].elapsed_time(end_events[i]) for i in range(runs)]
+    return sum(times) / len(times)
 
+# Single step
+timestep = torch.ones(1, device=device, dtype=torch.float32)
 
-def main():
-    parser = argparse.ArgumentParser(description="Simple Denoise Profiling")
-    parser.add_argument(
-        "--checkpoint",
-        type=str,
-        default=os.path.expanduser("~/.cache/openpi/checkpoints/pi05_libero"),
-        help="Model checkpoint directory"
-    )
-    parser.add_argument("--steps", type=int, default=10, help="Denoising steps")
-    parser.add_argument("--warmup", type=int, default=3, help="Warmup iterations")
-    parser.add_argument("--iterations", type=int, default=10, help="Profile iterations")
-    args = parser.parse_args()
+def single_step():
+    with torch.no_grad():
+        return model.denoise_step_with_cache(state, prefix_kv_cache, prefix_pad_masks, x_t, timestep)
 
-    run_profiling(
-        args.checkpoint,
-        num_steps=args.steps,
-        warmup=args.warmup,
-        iterations=args.iterations,
-    )
+step_ms = profile_with_cuda_events('single_step', single_step, runs=50)
+print(f'  单步 denoise_step_with_cache: {step_ms:.3f} ms')
+print(f'  10 步估算: {step_ms * 10:.2f} ms')
+print(f'  vs 实际循环: {no_graph_ms:.2f} ms')
+print(f'  循环 overhead: {no_graph_ms - step_ms * 10:.2f} ms')
 
+# 4. Summary
+print('\n' + '=' * 70)
+print('总结')
+print('=' * 70)
 
-if __name__ == "__main__":
-    main()
+print(f'''
+Denoise 10 步性能对比:
+┌────────────────────────────────────────────────────────────────────┐
+│ 方案                    │ 耗时        │ 加速     │ 节省        │
+├────────────────────────────────────────────────────────────────────┤
+│ 无 CUDA Graph (循环)    │ {no_graph_ms:6.2f} ms   │ 1.00x    │ baseline    │
+│ ChainedDenoiseGraphs    │ {chained_ms:6.2f} ms   │ {graph_speedup:.2f}x    │ {graph_savings:.2f} ms      │
+└────────────────────────────────────────────────────────────────────┘
+
+单步分析:
+  - 单步时间: {step_ms:.3f} ms
+  - 10 步理论: {step_ms * 10:.2f} ms
+  - 实际循环: {no_graph_ms:.2f} ms
+  - Python/CUDA overhead: {no_graph_ms - step_ms * 10:.2f} ms ({(no_graph_ms - step_ms * 10) / no_graph_ms * 100:.1f}%)
+
+CUDA Graph 效果:
+  - 消除了大部分 kernel launch overhead
+  - 10 步链式 graph 比 10 次单独 launch 更快
+
+进一步优化方向:
+  1. Graph 内部计算无法通过 Python 层面优化
+  2. 需要修改底层 kernel (如 Triton fused kernel)
+  3. 或减少计算量 (如减少 prefix_len)
+''')

@@ -408,6 +408,7 @@ class ChainedDenoiseGraphs(nn.Module):
         self._static_prefix_kv_cache = None
         self._static_suffix_position_ids = None
         self._static_adarms_conds = []
+        self._static_attention_mask = None
 
     def capture(
         self,
@@ -435,6 +436,7 @@ class ChainedDenoiseGraphs(nn.Module):
 
         self._static_suffix_position_ids = graph_tensors["suffix_position_ids"]
         self._static_adarms_conds = graph_tensors["adarms_conds"]
+        self._static_attention_mask = graph_tensors.get("attention_mask")
 
         # Create static buffers
         self._static_x_t = torch.randn(
@@ -460,6 +462,7 @@ class ChainedDenoiseGraphs(nn.Module):
                         self._static_suffix_position_ids,
                         adarms_cond,
                         self._static_prefix_kv_cache,
+                        self._static_attention_mask,
                     )
             torch.cuda.synchronize()
 
@@ -472,6 +475,7 @@ class ChainedDenoiseGraphs(nn.Module):
                     self._static_suffix_position_ids,
                     adarms_cond,
                     self._static_prefix_kv_cache,
+                    self._static_attention_mask,
                 )
                 self._static_v_t.copy_(v_t)
                 self._static_x_t.add_(self._static_v_t, alpha=self.dt)
@@ -522,12 +526,35 @@ class ChainedDenoiseGraphs(nn.Module):
             self._static_prefix_kv_cache[i][0].copy_(k)
             self._static_prefix_kv_cache[i][1].copy_(v)
 
-        # Update suffix position IDs if prefix_pad_masks provided
+        # Update suffix position IDs and attention mask if prefix_pad_masks provided
         # This is CRITICAL for correct behavior when prompt length varies
         if prefix_pad_masks is not None:
-            prefix_offset = torch.sum(prefix_pad_masks.long(), dim=-1, keepdim=True)
+            batch_size = prefix_pad_masks.shape[0]
+            prefix_len = prefix_pad_masks.shape[1]
             action_horizon = self.model.config.action_horizon
+
+            # Update position IDs
+            prefix_offset = torch.sum(prefix_pad_masks.long(), dim=-1, keepdim=True)
             new_position_ids = prefix_offset + torch.arange(
                 action_horizon, device=self.device, dtype=torch.long
             )
             self._static_suffix_position_ids.copy_(new_position_ids)
+
+            # Update attention mask
+            if self._static_attention_mask is not None:
+                # Rebuild attention mask for new prefix_pad_masks
+                suffix_pad_masks = torch.ones(batch_size, action_horizon, dtype=torch.bool, device=self.device)
+                suffix_att_masks = torch.zeros(batch_size, action_horizon, device=self.device, dtype=torch.bfloat16)
+                suffix_att_masks[:, 0] = 1.0
+
+                cumsum = torch.cumsum(suffix_att_masks.float(), dim=1)
+                att_2d = cumsum[:, None, :] <= cumsum[:, :, None]
+                pad_2d = suffix_pad_masks[:, None, :] & suffix_pad_masks[:, :, None]
+                suffix_att_2d = att_2d & pad_2d
+
+                suffix_to_prefix = prefix_pad_masks[:, None, :].expand(batch_size, action_horizon, -1)
+                full_att_masks = torch.cat([suffix_to_prefix, suffix_att_2d], dim=2)
+
+                new_att_mask = full_att_masks[:, None, :, :].to(torch.bfloat16)
+                new_att_mask = torch.where(new_att_mask.bool(), 0.0, -2.3819763e38).to(torch.bfloat16)
+                self._static_attention_mask.copy_(new_att_mask)

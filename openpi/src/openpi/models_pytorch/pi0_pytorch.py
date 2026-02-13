@@ -660,11 +660,12 @@ class PI0Pytorch(nn.Module):
         suffix_position_ids: Tensor,
         adarms_cond: Tensor,
         prefix_kv_cache: list[tuple[Tensor, Tensor]],
+        attention_mask: Tensor = None,
     ) -> Tensor:
         """CUDA Graph-compatible denoise step.
 
         This version avoids dynamic tensor creation, making it suitable for
-        CUDA Graph capture. All static tensors (position_ids, adarms_cond)
+        CUDA Graph capture. All static tensors (position_ids, adarms_cond, attention_mask)
         must be pre-computed and passed in.
 
         Args:
@@ -672,6 +673,7 @@ class PI0Pytorch(nn.Module):
             suffix_position_ids: (B, suffix_len) - pre-computed position IDs
             adarms_cond: (B, hidden_size) - pre-computed timestep conditioning
             prefix_kv_cache: List of (K, V) tuples from compute_prefix_kv_cache
+            attention_mask: (B, 1, action_horizon, prefix_len + action_horizon) - pre-computed attention mask
 
         Returns:
             (B, action_horizon, action_dim) - velocity prediction
@@ -727,9 +729,10 @@ class PI0Pytorch(nn.Module):
             full_key_states = torch.cat([cached_key, key_states], dim=2)
             full_value_states = torch.cat([cached_value, value_states], dim=2)
 
-            # SDPA attention (no mask - see SDPA optimization)
+            # SDPA attention with mask (handles prefix padding correctly)
             att_output = F.scaled_dot_product_attention(
-                query_states, full_key_states, full_value_states
+                query_states, full_key_states, full_value_states,
+                attn_mask=attention_mask,
             )
             att_output = att_output.transpose(1, 2).contiguous()
 
@@ -835,11 +838,39 @@ class PI0Pytorch(nn.Module):
 
             adarms_conds.append(adarms_cond)
 
+        # Pre-compute attention mask (for correct handling of prefix padding)
+        # Suffix tokens attend to: all valid prefix tokens + all suffix tokens
+        if prefix_pad_masks is not None:
+            # suffix_pad_masks: all True (no padding in actions)
+            suffix_pad_masks = torch.ones(batch_size, action_horizon, dtype=torch.bool, device=device)
+            # suffix_att_masks: only first token is special (start token)
+            suffix_att_masks = torch.zeros(batch_size, action_horizon, device=device, dtype=torch.bfloat16)
+            suffix_att_masks[:, 0] = 1.0
+
+            # Build 2D attention mask for suffix
+            cumsum = torch.cumsum(suffix_att_masks.float(), dim=1)
+            att_2d = cumsum[:, None, :] <= cumsum[:, :, None]  # causal within suffix
+            pad_2d = suffix_pad_masks[:, None, :] & suffix_pad_masks[:, :, None]
+            suffix_att_2d = att_2d & pad_2d
+
+            # Suffix can attend to all valid prefix positions
+            suffix_to_prefix = prefix_pad_masks[:, None, :].expand(batch_size, action_horizon, -1)
+
+            # Combine: [suffix_to_prefix, suffix_att_2d]
+            full_att_masks = torch.cat([suffix_to_prefix, suffix_att_2d], dim=2)  # (B, action_horizon, prefix_len + action_horizon)
+
+            # Convert to 4D attention mask: True -> 0.0, False -> -inf
+            full_att_masks_4d = full_att_masks[:, None, :, :].to(torch.bfloat16)
+            full_att_masks_4d = torch.where(full_att_masks_4d.bool(), 0.0, -2.3819763e38).to(torch.bfloat16)
+        else:
+            full_att_masks_4d = None
+
         return {
             "suffix_position_ids": suffix_position_ids,
             "adarms_conds": adarms_conds,
             "timestep_values": timestep_values,
             "dt": dt,
+            "attention_mask": full_att_masks_4d,
         }
 
     @torch.no_grad()
