@@ -424,11 +424,13 @@ class ChainedDenoiseGraphs(nn.Module):
         dtype = torch.bfloat16
 
         # Pre-compute all static tensors for graphed execution
+        # IMPORTANT: Pass prefix_pad_masks for correct position IDs calculation
         graph_tensors = self.model.precompute_graph_tensors(
             batch_size=batch_size,
             prefix_len=prefix_len,
             num_steps=self.num_steps,
             device=self.device,
+            prefix_pad_masks=prefix_pad_masks,
         )
 
         self._static_suffix_position_ids = graph_tensors["suffix_position_ids"]
@@ -501,15 +503,31 @@ class ChainedDenoiseGraphs(nn.Module):
     def update_kv_cache(
         self,
         prefix_kv_cache: List[Tuple[torch.Tensor, torch.Tensor]],
+        prefix_pad_masks: torch.Tensor = None,
     ):
         """Update the static KV cache for a new observation.
 
         Call this when the observation changes but you want to reuse
         the captured graphs (same prefix length required).
+
+        Args:
+            prefix_kv_cache: New KV cache to copy
+            prefix_pad_masks: Padding mask for prefix (REQUIRED for correct position IDs)
         """
         if not self._captured:
             raise RuntimeError("Graphs not captured.")
 
+        # Update KV cache
         for i, (k, v) in enumerate(prefix_kv_cache):
             self._static_prefix_kv_cache[i][0].copy_(k)
             self._static_prefix_kv_cache[i][1].copy_(v)
+
+        # Update suffix position IDs if prefix_pad_masks provided
+        # This is CRITICAL for correct behavior when prompt length varies
+        if prefix_pad_masks is not None:
+            prefix_offset = torch.sum(prefix_pad_masks.long(), dim=-1, keepdim=True)
+            action_horizon = self.model.config.action_horizon
+            new_position_ids = prefix_offset + torch.arange(
+                action_horizon, device=self.device, dtype=torch.long
+            )
+            self._static_suffix_position_ids.copy_(new_position_ids)

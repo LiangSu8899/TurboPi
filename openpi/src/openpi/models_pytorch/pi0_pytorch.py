@@ -770,6 +770,7 @@ class PI0Pytorch(nn.Module):
         prefix_len: int,
         num_steps: int = 10,
         device: torch.device = None,
+        prefix_pad_masks: torch.Tensor = None,
     ) -> dict:
         """Pre-compute static tensors for CUDA Graph capture.
 
@@ -783,6 +784,7 @@ class PI0Pytorch(nn.Module):
             prefix_len: Length of prefix (from prefix_pad_masks.shape[1])
             num_steps: Number of denoising steps (default 10)
             device: CUDA device
+            prefix_pad_masks: (B, prefix_len) - padding mask for prefix (IMPORTANT for correct position IDs)
 
         Returns:
             Dict with pre-computed tensors
@@ -795,11 +797,19 @@ class PI0Pytorch(nn.Module):
         action_horizon = self.config.action_horizon
 
         # Compute suffix position IDs (fixed for all steps)
-        # Position IDs continue from prefix
-        suffix_position_ids = torch.arange(
-            prefix_len, prefix_len + action_horizon,
-            device=device, dtype=torch.long
-        ).unsqueeze(0).expand(batch_size, -1)
+        # Position IDs continue from prefix - MUST use actual valid length, not shape
+        if prefix_pad_masks is not None:
+            # Use actual valid prefix length (sum of True values)
+            prefix_offsets = torch.sum(prefix_pad_masks.long(), dim=-1, keepdim=True)  # (B, 1)
+            suffix_position_ids = prefix_offsets + torch.arange(
+                action_horizon, device=device, dtype=torch.long
+            )  # (B, action_horizon)
+        else:
+            # Fallback: assume all prefix tokens are valid
+            suffix_position_ids = torch.arange(
+                prefix_len, prefix_len + action_horizon,
+                device=device, dtype=torch.long
+            ).unsqueeze(0).expand(batch_size, -1)
 
         # Pre-compute adarms_cond for each timestep
         dt = -1.0 / num_steps
