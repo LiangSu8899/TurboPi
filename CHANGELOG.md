@@ -2,6 +2,47 @@
 
 All notable changes to this project compared to the original [OpenPi](https://github.com/Physical-Intelligence/openpi) repository.
 
+## [1.3.1] - 2026-02-14
+
+### Fixed - TRT FP8 Denoise Attention Mask Bug
+
+Critical bug fix for TRT FP8 Denoise module that was causing 0% accuracy on LIBERO benchmark.
+
+#### Root Cause
+
+The original model's `denoise_step_with_cache` uses `F.scaled_dot_product_attention` **without any attention mask**:
+```python
+# Original model comment: "Since suffix attention mask is ALL TRUE (bidirectional),
+# we can skip the mask entirely."
+att_output = F.scaled_dot_product_attention(query_states, full_key_states, full_value_states)
+```
+
+The TRT implementation incorrectly applied an attention mask with `-10000` for padding positions, causing output divergence.
+
+#### Impact
+
+| Test | Before Fix | After Fix |
+|------|------------|-----------|
+| Single step cos_sim | 0.999 | 0.999 |
+| 10-step loop cos_sim | **-0.18** | **0.995** |
+| Step 9 (worst) | 0.54 | 0.997 |
+
+#### Changes
+
+- **`denoise_torch_trt_static.py`**: Removed `attn_mask` parameter from `SimpleAttention`, `SimpleDenoiseLayer`, `StaticDenoiseStep`, `StaticDenoiseLoop`; switched to SDPA without mask
+- **Test files updated**: `debug_trt_loop_step.py`, `debug_trt_step_by_step.py`, `test_trt_vs_original.py`, `test_trt_10step_loop.py`, `libero_eval_trt_fp8_full.py`
+
+#### Additional Fixes (from previous session)
+
+1. **Action projection bias**: Changed `bias=False` to `bias=True` for `action_in_proj` and `action_out_proj`
+2. **RoPE inv_freq precision**: Compute in BF16 to match original model precision
+
+#### Documentation
+
+- Added: `docs/debug-10-trt-denoise-fix.md`
+
+---
+
 ## [1.3.0] - 2026-02-07
 
 ### Changed - Code Organization and Documentation

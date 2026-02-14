@@ -148,12 +148,22 @@ class AdaRMSNorm(nn.Module):
 
 
 class RotaryEmbedding(nn.Module):
-    """Rotary Position Embedding with FP32 computation (precision protected)."""
+    """Rotary Position Embedding with BF16-compatible precision.
+
+    IMPORTANT: We must match the original model's inv_freq precision (BF16)
+    to get identical RoPE embeddings. The original model computes inv_freq
+    in BF16 which has less precision than FP32.
+    """
     def __init__(self, head_dim: int, base: float = ROPE_THETA):
         super().__init__()
         self.head_dim = head_dim
-        inv_freq = 1.0 / (base ** (torch.arange(0, head_dim, 2).float() / head_dim))
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        # Compute inv_freq in BF16 to match original model's precision
+        # Original: inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.int64).to(dtype=torch.float) / dim))
+        # Then stored in BF16 buffer
+        inv_freq_fp32 = 1.0 / (base ** (torch.arange(0, head_dim, 2, dtype=torch.int64).float() / head_dim))
+        inv_freq_bf16 = inv_freq_fp32.to(torch.bfloat16)
+        # Store as FP32 for computation but with BF16-quantized values
+        self.register_buffer("inv_freq", inv_freq_bf16.float(), persistent=False)
 
     def forward(self, x: torch.Tensor, position_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         # All computation in FP32 (precision protected)
@@ -228,6 +238,12 @@ class SimpleAttention(nn.Module):
     ) -> torch.Tensor:
         """Forward pass with static shapes.
 
+        IMPORTANT: No attention mask is used here to match the original model!
+        The original model's denoise_step_with_cache uses SDPA without mask:
+            att_output = F.scaled_dot_product_attention(query_states, full_key_states, full_value_states)
+        The comment explains: "Since suffix attention mask is ALL TRUE (bidirectional),
+        we can skip the mask entirely."
+
         Args:
             hidden_states: (B, action_horizon, hidden_size)
             cos, sin: (B, action_horizon, head_dim)
@@ -254,18 +270,15 @@ class SimpleAttention(nn.Module):
         v = torch.cat([cached_value, v], dim=2)
 
         # Expand KV for GQA (static repeat)
+        # Note: SDPA can handle GQA via broadcasting, but we expand explicitly
+        # for TRT compatibility
         if self.num_groups > 1:
             k = k.repeat_interleave(self.num_groups, dim=1)
             v = v.repeat_interleave(self.num_groups, dim=1)
 
-        # Attention scores
-        attn_weights = torch.matmul(q, k.transpose(2, 3)) * self.scale
-
-        # Softmax in FP32 (CRITICAL for precision!)
-        attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(q.dtype)
-
-        # Attention output
-        attn_output = torch.matmul(attn_weights, v)
+        # Use SDPA without mask (matching original model behavior!)
+        # The original uses: F.scaled_dot_product_attention(query_states, full_key_states, full_value_states)
+        attn_output = F.scaled_dot_product_attention(q, k, v)
         attn_output = attn_output.transpose(1, 2).contiguous()
 
         # Static reshape
@@ -296,7 +309,7 @@ class SimpleDenoiseLayer(nn.Module):
         # Pre-attention norm with adaptive conditioning
         normed, gate = self.input_layernorm(hidden_states, cond=adarms_cond)
 
-        # Attention
+        # Attention (no mask - matching original model)
         attn_output = self.self_attn(normed, cos, sin, cached_key, cached_value)
 
         # Gated residual connection
@@ -340,9 +353,9 @@ class StaticDenoiseStep(nn.Module):
         self.prefix_len = prefix_len
         self.num_layers = num_layers
 
-        # Action projection
-        self.action_in_proj = nn.Linear(action_dim, HIDDEN_SIZE, bias=False)
-        self.action_out_proj = nn.Linear(HIDDEN_SIZE, action_dim, bias=False)
+        # Action projection (IMPORTANT: must have bias=True to match checkpoint!)
+        self.action_in_proj = nn.Linear(action_dim, HIDDEN_SIZE, bias=True)
+        self.action_out_proj = nn.Linear(HIDDEN_SIZE, action_dim, bias=True)
 
         # Transformer layers
         self.layers = nn.ModuleList([SimpleDenoiseLayer() for _ in range(num_layers)])
@@ -361,14 +374,18 @@ class StaticDenoiseStep(nn.Module):
         cached_keys: torch.Tensor,      # (num_layers, B, num_kv_heads, prefix_len, head_dim)
         cached_values: torch.Tensor,    # (num_layers, B, num_kv_heads, prefix_len, head_dim)
     ) -> torch.Tensor:
-        """Single denoise step forward."""
+        """Single denoise step forward.
+
+        Note: No attention mask is used to match the original model behavior.
+        The original model's denoise_step_with_cache uses SDPA without mask.
+        """
         # Embed actions
         hidden_states = self.action_in_proj(x_t)
 
         # Compute RoPE for suffix positions
         cos, sin = self.rotary_emb(hidden_states, suffix_position_ids)
 
-        # Process through all layers
+        # Process through all layers (no mask)
         for i in range(self.num_layers):
             hidden_states = self.layers[i](
                 hidden_states,
@@ -424,7 +441,10 @@ class StaticDenoiseLoop(nn.Module):
         cached_keys: torch.Tensor,          # (num_layers, B, num_kv_heads, prefix_len, head_dim)
         cached_values: torch.Tensor,        # (num_layers, B, num_kv_heads, prefix_len, head_dim)
     ) -> torch.Tensor:
-        """Full denoise loop (unrolled, static)."""
+        """Full denoise loop (unrolled, static).
+
+        Note: No attention mask is used to match the original model behavior.
+        """
         x_t = noise
         dt = self.dt
 
@@ -433,10 +453,10 @@ class StaticDenoiseLoop(nn.Module):
             # Get pre-computed adarms condition for this step
             adarms_cond = adarms_conds[step]
 
-            # Single denoise step
+            # Single denoise step (no mask)
             v_t = self.denoise_step(
                 x_t, suffix_position_ids, adarms_cond,
-                cached_keys, cached_values
+                cached_keys, cached_values,
             )
 
             # Flow matching update: x_{t-1} = x_t + v_t * dt
@@ -473,9 +493,11 @@ def load_weights_from_checkpoint(model: nn.Module, checkpoint_dir: str, device: 
     else:
         denoise_step = model
 
-    # Load action projections
+    # Load action projections (weight and bias)
     denoise_step.action_in_proj.weight.data = state_dict["action_in_proj.weight"].to(dtype).to(device)
+    denoise_step.action_in_proj.bias.data = state_dict["action_in_proj.bias"].to(dtype).to(device)
     denoise_step.action_out_proj.weight.data = state_dict["action_out_proj.weight"].to(dtype).to(device)
+    denoise_step.action_out_proj.bias.data = state_dict["action_out_proj.bias"].to(dtype).to(device)
 
     # Load transformer layers from gemma_expert
     # Key format: paligemma_with_expert.gemma_expert.model.layers.{i}.{component}
@@ -684,30 +706,40 @@ def main():
     # Create example inputs (STATIC shapes, FP16)
     dtype = torch.float16
 
+    # Create full attention mask (zeros = all valid for compilation test)
+    # Shape: (B, 1, 1, prefix_len + action_horizon) - full size for attention
+    # First prefix_len positions can be padding (-inf), suffix positions are always 0
+    full_seq_len = args.prefix_len + args.action_horizon
+    attn_mask = torch.zeros(args.batch_size, 1, 1, full_seq_len, dtype=dtype, device=device)
+
     if args.compile_loop:
-        # Full loop inputs
+        # Full loop inputs (6 arguments including mask)
         example_inputs = (
             torch.randn(args.batch_size, args.action_horizon, ACTION_DIM, dtype=dtype, device=device),
             torch.arange(args.prefix_len, args.prefix_len + args.action_horizon, dtype=torch.long, device=device).unsqueeze(0).expand(args.batch_size, -1),
             torch.randn(args.num_steps, args.batch_size, HIDDEN_SIZE, dtype=dtype, device=device),
             torch.randn(NUM_LAYERS, args.batch_size, NUM_KV_HEADS, args.prefix_len, HEAD_DIM, dtype=dtype, device=device),
             torch.randn(NUM_LAYERS, args.batch_size, NUM_KV_HEADS, args.prefix_len, HEAD_DIM, dtype=dtype, device=device),
+            attn_mask,
         )
     else:
-        # Single step inputs
+        # Single step inputs (6 arguments including mask)
         example_inputs = (
             torch.randn(args.batch_size, args.action_horizon, ACTION_DIM, dtype=dtype, device=device),
             torch.arange(args.prefix_len, args.prefix_len + args.action_horizon, dtype=torch.long, device=device).unsqueeze(0).expand(args.batch_size, -1),
             torch.randn(args.batch_size, HIDDEN_SIZE, dtype=dtype, device=device),
             torch.randn(NUM_LAYERS, args.batch_size, NUM_KV_HEADS, args.prefix_len, HEAD_DIM, dtype=dtype, device=device),
             torch.randn(NUM_LAYERS, args.batch_size, NUM_KV_HEADS, args.prefix_len, HEAD_DIM, dtype=dtype, device=device),
+            attn_mask,
         )
 
-    # Verify original module works
+    # Verify original module works and SAVE OUTPUT before compilation
+    # (FP8 quantization modifies the model in-place!)
     print("\nTesting original module...")
     with torch.no_grad():
-        output = model(*example_inputs)
-    print(f"  Output shape: {output.shape}")
+        orig_output = model(*example_inputs).clone()  # Save BEFORE compilation
+    print(f"  Output shape: {orig_output.shape}")
+    print(f"  Output mean: {orig_output.mean():.4f}, nan: {torch.isnan(orig_output).any()}")
 
     if args.benchmark:
         orig_time = benchmark_module(model, example_inputs)
@@ -725,11 +757,9 @@ def main():
         with torch.no_grad():
             compiled_output = compiled(*example_inputs)
         print(f"  Output shape: {compiled_output.shape}")
+        print(f"  Output mean: {compiled_output.mean():.4f}, nan: {torch.isnan(compiled_output).any()}")
 
-        # Check accuracy
-        with torch.no_grad():
-            orig_output = model(*example_inputs)
-
+        # Check accuracy against saved original output
         diff = torch.abs(compiled_output.float() - orig_output.float()).max().item()
         cos_sim = F.cosine_similarity(
             compiled_output.float().flatten().unsqueeze(0),
