@@ -840,7 +840,8 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint_dir",
                        default=os.path.expanduser("~/.cache/openpi/checkpoints/pi05_libero"))
     parser.add_argument("--denoise_trt_path",
-                       default="/workspace/denoise_trt_static/denoise_loop_fp8.pt")
+                       default="/workspace/denoise_trt_static_v5/denoise_loop_fp16.pt",
+                       help="Path to compiled TRT denoise model (v5 uses SDPA without mask)")
     parser.add_argument("--denoising_steps", type=int, default=10)
 
     parser.add_argument("--replan_steps", type=int, default=5)

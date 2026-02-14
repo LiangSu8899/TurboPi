@@ -279,10 +279,12 @@ class SimpleAttention(nn.Module):
         # Use SDPA without mask (matching original model behavior!)
         # The original uses: F.scaled_dot_product_attention(query_states, full_key_states, full_value_states)
         attn_output = F.scaled_dot_product_attention(q, k, v)
-        attn_output = attn_output.transpose(1, 2).contiguous()
+        # Use transpose + reshape (not view) for TRT compatibility
+        attn_output = attn_output.transpose(1, 2)
 
-        # Static reshape
-        attn_output = attn_output.view(B, S, self.num_heads * self.head_dim)
+        # Use reshape instead of view for TRT tracing compatibility
+        # (view fails with non-contiguous strides during TRT export)
+        attn_output = attn_output.reshape(B, S, self.num_heads * self.head_dim)
 
         return self.o_proj(attn_output)
 
@@ -704,33 +706,26 @@ def main():
         print("No checkpoint found, using random weights for compilation test")
 
     # Create example inputs (STATIC shapes, FP16)
+    # Note: No attention mask - matching original model behavior (SDPA without mask)
     dtype = torch.float16
 
-    # Create full attention mask (zeros = all valid for compilation test)
-    # Shape: (B, 1, 1, prefix_len + action_horizon) - full size for attention
-    # First prefix_len positions can be padding (-inf), suffix positions are always 0
-    full_seq_len = args.prefix_len + args.action_horizon
-    attn_mask = torch.zeros(args.batch_size, 1, 1, full_seq_len, dtype=dtype, device=device)
-
     if args.compile_loop:
-        # Full loop inputs (6 arguments including mask)
+        # Full loop inputs (5 arguments, NO mask)
         example_inputs = (
             torch.randn(args.batch_size, args.action_horizon, ACTION_DIM, dtype=dtype, device=device),
             torch.arange(args.prefix_len, args.prefix_len + args.action_horizon, dtype=torch.long, device=device).unsqueeze(0).expand(args.batch_size, -1),
             torch.randn(args.num_steps, args.batch_size, HIDDEN_SIZE, dtype=dtype, device=device),
             torch.randn(NUM_LAYERS, args.batch_size, NUM_KV_HEADS, args.prefix_len, HEAD_DIM, dtype=dtype, device=device),
             torch.randn(NUM_LAYERS, args.batch_size, NUM_KV_HEADS, args.prefix_len, HEAD_DIM, dtype=dtype, device=device),
-            attn_mask,
         )
     else:
-        # Single step inputs (6 arguments including mask)
+        # Single step inputs (5 arguments, NO mask)
         example_inputs = (
             torch.randn(args.batch_size, args.action_horizon, ACTION_DIM, dtype=dtype, device=device),
             torch.arange(args.prefix_len, args.prefix_len + args.action_horizon, dtype=torch.long, device=device).unsqueeze(0).expand(args.batch_size, -1),
             torch.randn(args.batch_size, HIDDEN_SIZE, dtype=dtype, device=device),
             torch.randn(NUM_LAYERS, args.batch_size, NUM_KV_HEADS, args.prefix_len, HEAD_DIM, dtype=dtype, device=device),
             torch.randn(NUM_LAYERS, args.batch_size, NUM_KV_HEADS, args.prefix_len, HEAD_DIM, dtype=dtype, device=device),
-            attn_mask,
         )
 
     # Verify original module works and SAVE OUTPUT before compilation
