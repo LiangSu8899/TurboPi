@@ -16,7 +16,7 @@ Expected performance:
 
 Usage:
     docker exec -it turbo_pi_eval python /workspace/scripts/denoise_torch_trt_static.py \
-        --checkpoint_dir /root/.cache/openpi/pytorch_checkpoints/pi05_libero \
+        --checkpoint_dir /root/.cache/openpi/checkpoints/pi05_libero \
         --output_path /workspace/denoise_trt \
         --precision fp8
 
@@ -471,7 +471,7 @@ def load_weights_from_checkpoint(model: nn.Module, checkpoint_dir: str, device: 
     """Load weights from pi0.5 checkpoint into static model.
 
     Note: Use /root/.cache/openpi/checkpoints/pi05_libero (PyTorch format),
-    NOT /root/.cache/openpi/pytorch_checkpoints/pi05_libero (JAX format).
+    NOT /root/.cache/openpi/checkpoints/pi05_libero (JAX format).
     """
     from safetensors import safe_open
 

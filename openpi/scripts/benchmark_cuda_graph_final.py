@@ -35,7 +35,7 @@ def benchmark_standard_pytorch():
     from openpi.inference.unified_policy import UnifiedPolicy
 
     policy = UnifiedPolicy(
-        checkpoint_dir="/root/.cache/openpi/pytorch_checkpoints/pi05_libero",
+        checkpoint_dir="/root/.cache/openpi/checkpoints/pi05_libero",
         backend="pytorch",
         num_denoising_steps=10,
         device="cuda",
@@ -83,7 +83,7 @@ def benchmark_with_cuda_graph():
     from openpi.modules.graphed_denoise import ChainedDenoiseGraphs
 
     policy = UnifiedPolicy(
-        checkpoint_dir="/root/.cache/openpi/pytorch_checkpoints/pi05_libero",
+        checkpoint_dir="/root/.cache/openpi/checkpoints/pi05_libero",
         backend="pytorch",
         num_denoising_steps=10,
         device="cuda",
